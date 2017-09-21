@@ -1,0 +1,361 @@
+// NO_SYS_MAIN - Versuch 2
+
+// NO_SYS_main.c
+// Set up for receiving and transmitting ethernet packet with following specification
+// Link layer: Address Resolution Protocol (ARP) etharp
+// Internet layer: Internet Protocol (IP)
+// zuerst UDP (loopback: empfangen dann senden) dann TCP(loopback analog zu UDP, braucht vermutlich mehr timer)
+// Transport layer: Transmission Control Protocol (TCP)
+// --- Actually we use LWIP_RAW --- Application layer:Dynamic Host Configuration Protocol (DHCP)/HTTP
+// demowebserver von LWIP
+
+
+// 20.09.2017
+
+
+//
+
+#include <stdio.h>
+#include <string.h>
+#include <optimsoc-baremetal.h>
+#include <optimsoc-runtime.h>
+
+//#include "lwip/opt.h"
+#include "lwip/init.h"
+#include "lwip/stats.h"
+#include "lwip/pbuf.h"
+#include "lwip/raw.h"
+#include "netif/ethernet.h"
+#include "lwip/pbuf.h"
+#include "lwip/ip_addr.h"
+// #include "lwip/netif.h" included in ethernet.h
+
+#include "lwip/timeouts.h"
+//#include "queue.h"
+
+
+#define ETH_INTERRUPT 4
+#define ESS_BASE 0xD0000000
+#define FIFO_BASE 0xC0000000
+// Definition MAC Address
+int mymac[6] = {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc};
+const void* MYMACADDRESS = &mymac;
+
+
+
+unsigned int volatile * const ISR   = (unsigned int *) (FIFO_BASE + 0x00000000);
+unsigned int volatile * const IER   = (unsigned int *) (FIFO_BASE + 0x00000004);
+unsigned int volatile * const TDFR   = (unsigned int *) (FIFO_BASE + 0x00000008);
+unsigned int volatile * const TDFV  = (unsigned int *) (FIFO_BASE + 0x0000000C);
+unsigned int * const TDFD  = (unsigned int *) (FIFO_BASE + 0x00000010);
+unsigned int volatile * const TLR   = (unsigned int *) (FIFO_BASE + 0x00000014);
+unsigned int volatile * const RDFR  = (unsigned int *) (FIFO_BASE + 0x00000018);
+unsigned int volatile * const RDFO  = (unsigned int *) (FIFO_BASE + 0x0000001C);
+unsigned int volatile * const RDFD  = (unsigned int *) (FIFO_BASE + 0x00000020);
+unsigned int volatile * const RLR   = (unsigned int *) (FIFO_BASE + 0x00000024);
+unsigned int volatile * const SRR   = (unsigned int *) (FIFO_BASE + 0x00000028);
+unsigned int volatile * const TDR   = (unsigned int *) (FIFO_BASE + 0x0000002C);
+unsigned int volatile * const RDR   = (unsigned int *) (FIFO_BASE + 0x00000030);
+
+//Queue queue; // initalisieren von queue;
+
+// Incoming packet queue
+struct optimsoc_list_t *eth_rx_pbuf_queue = NULL;
+
+
+void eth_mac_irq(void* arg);
+
+
+// Interrupt Service Routine initialisieren
+static void app_init()
+{
+    or1k_interrupt_handler_add(ETH_INTERRUPT, &eth_mac_irq, 0);
+    or1k_interrupt_enable(ETH_INTERRUPT);
+
+
+    *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
+    printf("IER Register: %x\n", *IER);
+
+    or1k_timer_init(1000); // Hz == 1us Timer tickets
+
+    or1k_timer_enable();
+
+    or1k_interrupts_enable();
+}
+
+uint32_t swap_uint32( uint32_t val )
+{
+    val = ((val << 8) & 0xFF00FF00 ) | ((val >> 8) & 0xFF00FF );
+    return (val << 16) | (val >> 16);
+}
+
+
+/**
+ * Interrupt Service Routine: New packet has been received
+ */
+void eth_mac_irq(void* arg)
+{
+    (void) arg; // unused argument
+    printf("This fine?\n");
+    long ISR_V = *ISR;
+    // Read the input into eth_data and the length into eth_data_count
+    // Receive access
+    uint32_t *eth_data = NULL;
+    u16_t eth_data_count = 0;
+
+    printf("WERE HERE\n");
+
+    if (!(ISR_V & 0x4000000)) {
+        printf("got interrupt_v %x\n", ISR_V);
+        *ISR = 0xFFFFFFFF;
+        return;
+    }
+
+
+    printf("Receive Complete Bit active.\n");
+    printf("ISR is %p\n", *ISR);
+    *ISR = 0xFFFFFFFF;
+    uint32_t RDFO_V = *RDFO;
+
+    if (RDFO_V > 0) {
+        printf("Received Bytes are in the buffer.\n");
+        eth_data_count = *RLR; // don't write u16_t in front!
+        printf("eth_data_count %x\n", eth_data_count);
+        int des_adr = *RDR;
+        int i = 0;
+        eth_data = calloc(eth_data_count/4, sizeof(uint32_t));
+        for (i = 0; i < eth_data_count/4; i++) {
+            eth_data[i] = swap_uint32(*RDFD);
+            printf("got %x\n", eth_data[i]);
+        }
+    } else {
+        printf("RDFO was empty+.\n");
+    }
+
+
+
+    /* Allocate pbuf from pool (avoid using heap in interrupts) */
+    printf("eth_data_count %d\n", eth_data_count);
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
+
+    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
+    printf("allocation of p at %p\n", p);
+
+    if (p != NULL) {
+        /* Copy ethernet frame into pbuf */
+        err_t rv;
+        rv = pbuf_take(p, (const void*) eth_data, eth_data_count);
+        if (rv != ERR_OK) {
+            printf("pbuf_take() FAILED returned %d\n", rv);
+        }
+        free(eth_data);
+
+        printf("putting data into optimsoc buffer\n");
+
+        /* Put in a queue which is processed in main loop */
+        optimsoc_list_add_tail(eth_rx_pbuf_queue, p);
+
+        optimsoc_list_iterator_t it;
+        struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
+    }
+}
+
+static err_t 
+netif_output(struct netif *netif, struct pbuf *p)
+{
+  LINK_STATS_INC(link.xmit);
+
+  /* Update SNMP stats (only if you use SNMP) */
+  //MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
+  //int unicast = ((p->payload[0] & 0x01) == 0);
+  //if (unicast) {
+  //  MIB2_STATS_NETIF_INC(netif, ifinucastpkts);
+  //} else {
+  //  MIB2_STATS_NETIF_INC(netif, ifinnucastpkts);
+  //}
+  printf("I am in netif_output.\n");
+  // void* mac_send_buffer = TDFD;
+
+  uint32_t restore = or1k_critical_begin();
+  *TDR = (uint32_t) 0x00000002;
+  struct pbuf *q;
+  int left;
+  for (left = 0; left < ((p->tot_len)/4); left = left + 1){
+      *TDFD = ((uint32_t *)p->payload)[left];
+      printf("p->payload now: %x\n", ((uint32_t *)p->payload)[left]);
+  }
+  // u16_t tx_ct = pbuf_copy_partial(p, TDFD, p->tot_len, 0);
+  /* Start MAC transmit here */
+  printf("p->len is: %x\n", p->len);
+  *TLR = (uint32_t) p->tot_len;
+  printf("ISR_value = %x\n", *ISR);
+  *ISR = (unsigned int) 0xFFFFFFFF;
+  or1k_critical_end(restore);
+
+  return ERR_OK;
+}
+
+static void 
+netif_status_callback(struct netif *netif)
+{
+  // printf("netif status changed %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
+	printf("netif status changed.\n");
+}
+
+err_t my_output()
+{
+	printf("trying to send packet\n");
+	return 0;
+}
+
+static err_t 
+my_init(struct netif *netif)
+{
+  netif->linkoutput = netif_output;
+  netif->output     = my_output;
+  // netif->output_ip6 = ethip6_output;
+  // netif->mtu        = ETHERNET_MTU;
+  netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
+  // MIB2_INIT_NETIF(netif, snmp_ifType_ethernet_csmacd, 100000000);
+
+  SMEMCPY(netif->hwaddr, MYMACADDRESS, sizeof(netif->hwaddr));
+  netif->hwaddr_len = sizeof(netif->hwaddr);
+
+  return ERR_OK;
+}
+
+// generate a pbuf with data
+struct pbuf* gen_pbuf(u16_t len){
+	printf("I am in gen_pbuf.\n");
+	printf("len = %i\n", len);
+	uint32_t *eth_send = NULL;
+	eth_send = calloc(len/4, sizeof(uint32_t));
+	eth_send[0] = (uint32_t) 0x90e2ba46;
+	eth_send[1] = (uint32_t) 0x5a123456;
+	eth_send[2] = (uint32_t) 0x789abc08;
+	eth_send[3] = (uint32_t) 0x00450000;
+	eth_send[4] = (uint32_t) 0x24c24a40;
+	eth_send[5] = (uint32_t) 0x0040113e;
+	eth_send[6] = (uint32_t) 0x1781bb9b;
+	eth_send[7] = (uint32_t) 0x3781bb9b;
+	eth_send[8] = (uint32_t) 0xb1b041d5;
+	eth_send[9] = (uint32_t) 0xdf00103a;
+	eth_send[10] = (uint32_t) 0x81544346;
+	eth_send[11] = (uint32_t) 0x32040000;
+	eth_send[12] = (uint32_t) 0x000000;
+	printf("eth_data_send[0]: %x\n", eth_send[0]);
+        struct pbuf* tx_p = pbuf_alloc(PBUF_RAW, (u16_t) len, PBUF_RAM); // here maybe PBUF_RAM
+	pbuf_take(tx_p, (const void*) eth_send, len);
+
+	printf("p->payload: %x\n", *((uint32_t *)tx_p->payload));
+	printf("p->next: %x\n", tx_p->next); // only one element!
+
+	return tx_p;
+}
+
+void init()
+{
+
+}
+
+void main(void)
+{
+    // struct pbuf* tx_p_try = pbuf_alloc(PBUF_RAW, (u16_t) 0x10, PBUF_RAM); // here maybe PBUF_RAM
+    //printf("Is allocated!\n");
+    // return;
+    app_init(); // ISR initialisieren
+    //queueInit(&queue, 30); // Queue initialisieren
+    struct netif netif;
+
+    lwip_init();
+
+    netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
+              netif_input);
+    netif.name[0] = 'e';
+    netif.name[1] = '0';
+    //netif_create_ip6_linklocal_address(&netif, 1);
+    //netif.ip6_autoconfig_enabled = 1;
+    netif_set_status_callback(&netif, netif_status_callback);
+    netif_set_default(&netif);
+    netif_set_up(&netif);
+
+    // All initialization done, we're ready to receive data
+    printf("init done, interrupts enabled\n");
+    printf("IER Register: %x\n", *IER);
+
+    /* Start DHCP and HTTPD */
+    // dhcp_start(&netif );
+    // httpd_init();
+    int T_en = 1;
+    while (1) {
+        // TODO: Check link status
+
+        /* Check for received frames, feed them to lwIP */
+
+        if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) {
+            printf("ARE WE HERE?\n");
+            uint32_t restore = or1k_critical_begin();
+            struct pbuf* p = (struct pbuf*) optimsoc_list_remove_head(eth_rx_pbuf_queue);
+            or1k_critical_end(restore);
+
+            printf("got packet on main thread from pbuf\n");
+            printf("something: %x\n", *((unsigned long *)(p->payload)));
+            LINK_STATS_INC(link.recv);
+            /* Update SNMP stats (only if you use SNMP) */
+            // TODO: see if that's useful for us
+            /*MIB2_STATS_NETIF_ADD(netif, ifoutoctets, p->tot_len);
+             int unicast = ((p->payload[0] & 0x01) == 0);
+             if (unicast) {
+             MIB2_STATS_NETIF_INC(netif, ifoutucastpkts);
+             } else {
+             MIB2_STATS_NETIF_INC(netif, ifoutnucastpkts);
+             }*/
+            printf("netif flags: %x\n", netif.flags);
+            printf("Condition netif_input: %i\n", (netif.flags & (NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET)));
+            printf("p->len: %i\n", p->len);
+            printf("p->if_idx: %i\n", p->if_idx);
+
+
+            if (netif.input(p, &netif) != ERR_OK) {
+                pbuf_free(p);
+            }
+            else{
+                printf("sent payload to netif input\n");
+                eth_rx_pbuf_queue = NULL;
+            }
+
+        }
+
+        // Transmit a packet
+        if (T_en == 1) {
+            // build a packet
+            *ISR = 0xFFFFFFFF;
+            u16_t tx_len = 0x33; // hex für 51
+            struct pbuf* p2 = gen_pbuf(tx_len);
+            // write the packet into the stream FIFO
+            printf("I am back in main (TX).\n");
+            printf("main: p2->payload is:%x\n", ((uint32_t *)p2->payload)[1]);
+            printf("main: p2->tot_len is: %i\n", p2->tot_len);
+            netif_output(&netif, p2);
+            T_en = 0;
+            printf("Back in main after transmission.\n");
+        }
+
+        /* Cyclic lwIP timers check */
+        // sys_check_timeouts();
+
+        /* your application goes here */
+    }
+}
+
+
+
+
+
+// REST
+
+
+
+
+
+
