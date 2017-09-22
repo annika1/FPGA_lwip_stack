@@ -31,6 +31,7 @@
 // #include "lwip/netif.h" included in ethernet.h
 
 #include "lwip/timeouts.h"
+#include "lwip/sys.h"
 //#include "queue.h"
 
 
@@ -76,7 +77,9 @@ static void app_init()
     *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
     printf("IER Register: %x\n", *IER);
 
-    or1k_timer_init(1000); // Hz == 1us Timer tickets
+    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
+
+    or1k_timer_init(1000); // Hz == 1ms Timer tickets
 
     or1k_timer_enable();
 
@@ -96,14 +99,11 @@ uint32_t swap_uint32( uint32_t val )
 void eth_mac_irq(void* arg)
 {
     (void) arg; // unused argument
-    printf("This fine?\n");
     long ISR_V = *ISR;
     // Read the input into eth_data and the length into eth_data_count
     // Receive access
     uint32_t *eth_data = NULL;
     u16_t eth_data_count = 0;
-
-    printf("WERE HERE\n");
 
     if (!(ISR_V & 0x4000000)) {
         printf("got interrupt_v %x\n", ISR_V);
@@ -141,8 +141,6 @@ void eth_mac_irq(void* arg)
     /* Allocate pbuf from pool (avoid using heap in interrupts) */
     printf("eth_data_count %d\n", eth_data_count);
     struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
-
-    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
     printf("allocation of p at %p\n", p);
 
     if (p != NULL) {
@@ -161,13 +159,19 @@ void eth_mac_irq(void* arg)
 
         optimsoc_list_iterator_t it;
         struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
+
+        printf("list length %x\n", optimsoc_list_length(eth_rx_pbuf_queue));
+        printf("list end: %x\n", eth_rx_pbuf_queue);
+        printf("equal NULL? : %i\n", eth_rx_pbuf_queue != NULL);
     }
+    printf("end of ISR.\n");
 }
 
 static err_t 
 netif_output(struct netif *netif, struct pbuf *p)
 {
   LINK_STATS_INC(link.xmit);
+
   // TODO: Is this useful for us?
   /* Update SNMP stats (only if you use SNMP) */
   //MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
@@ -177,38 +181,30 @@ netif_output(struct netif *netif, struct pbuf *p)
   //} else {
   //  MIB2_STATS_NETIF_INC(netif, ifinnucastpkts);
   //}
+
+  printf("Writing to Stream FIFO and start transmission.\n");
   uint32_t TDFV_before = *TDFV;
   printf("TDFV_before: %x\n", TDFV_before);
-  printf("I am in netif_output.\n");
   uint32_t restore_2 = or1k_critical_begin();
   *TDR = (uint32_t) 0x00000002; // Destination Device Address
 
   struct pbuf *q;
   uint32_t left, tmp_len;
   for (left = 0; left < ((p->tot_len)/4); left = left + 1){
-      *TDFD = ((uint32_t *)p->payload)[left];
-      printf("p->payload now: %x\n", ((uint32_t *)p->payload)[left]);
+      *TDFD = swap_uint32(((uint32_t *)p->payload)[left]);
+      printf("p->payload now: %x\n", swap_uint32(((uint32_t *)p->payload)[left]));
   }
   /* Start MAC transmit here */
-
   // Compare Transmit length and occupied storage in Stream FIFO
   uint32_t TDFV_after = *TDFV;
   printf("TDFV_after: %x\n", TDFV_after);
   uint32_t buf_used = TDFV_before - TDFV_after; // used buffer in FIFO
-  if (4*buf_used == p->tot_len){
-      *TLR = p->tot_len;
-      printf("Length %x written to TLR\n", p->tot_len);
-  }
-  else{
-      //*TLR = 4*buf_used;
-      *TLR = p->tot_len;
-      printf("Length %x was wrong written is %x\n", p->tot_len, 4*buf_used);
-  }
+  *TLR = p->tot_len;
+  printf("Length %x written to TLR\n", p->tot_len);
   printf("ISR_value = %x\n", *ISR);
   *ISR = (unsigned int) 0xFFFFFFFF;
   printf("ISR_V after reset: %x\n", *ISR);
   or1k_critical_end(restore_2);
-
   return ERR_OK;
 }
 
@@ -241,9 +237,7 @@ my_init(struct netif *netif)
   return ERR_OK;
 }
 
-// generate a pbuf with data
 struct pbuf* gen_pbuf(u16_t len){
-	printf("I am in gen_pbuf.\n");
 	uint32_t *eth_send = NULL;
 	eth_send = calloc(len/4, sizeof(uint32_t)); // TODO: missing check for the buffer overflow
 	eth_send[0] = (uint32_t) 0x9abc90e2;
@@ -258,11 +252,6 @@ struct pbuf* gen_pbuf(u16_t len){
 	eth_send[9] = (uint32_t) 0xd5df0010;
 	eth_send[10] = (uint32_t) 0x3a815443;
 	eth_send[11] = (uint32_t) 0x46320400;
-	int i;
-	for (i = 0; i < 12; i++){
-	    eth_send[i] = swap_uint32(eth_send[i]);
-	}
-
         struct pbuf* tx_p = pbuf_alloc(PBUF_RAW, (u16_t) len, PBUF_RAM);
 	pbuf_take(tx_p, (const void*) eth_send, len);
 	printf("generate a packet of length: 0x%x\n", tx_p->tot_len);
@@ -290,7 +279,7 @@ void main(void)
     netif_set_up(&netif);
 
     // All initialization done, we're ready to receive data
-    printf("Init done, interrupts enabled\n");
+    printf("Reset done, Init done, interrupts enabled\n");
     printf("IER Register: %x\n", *IER);
 
 
@@ -298,15 +287,17 @@ void main(void)
     // dhcp_start(&netif );
     // httpd_init();
 
-    int T_en = 1;
-
+    int T_en = 0;
+    u32_t now = 0;
+    u32_t last = 0;
+    printf("ISR is at the beginning: %x\n", *ISR);
     while (1) {
         // TODO: Check link status
 
         /* Check for received frames, feed them to lwIP */
-
-        if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) {
-            printf("ARE WE HERE?\n");
+        if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0)
+        {
+            printf("If was true.\n");
             uint32_t restore = or1k_critical_begin();
             struct pbuf* p = (struct pbuf*) optimsoc_list_remove_head(eth_rx_pbuf_queue);
             or1k_critical_end(restore);
@@ -334,12 +325,12 @@ void main(void)
             }
             else{
                 printf("sent payload to netif input\n");
-                eth_rx_pbuf_queue = NULL;
+                // eth_rx_pbuf_queue = NULL;
             }
-
         }
 
-        // Transmit a packet
+
+        /* Transmit a packet */
         if (T_en == 1) {
             // build a packet
             u16_t tx_len = 0x30; // packet length
@@ -349,10 +340,18 @@ void main(void)
             printf("Back in main after transmission.\n");
         }
 
-        /* Cyclic lwIP timers check */
-        // sys_check_timeouts();
 
-        /* your application goes here */
+        /* Cyclic lwIP timers check */
+        now = sys_now();
+
+        if (now > 5000){
+            printf("Reinitalization.\n");
+            app_init();
+            lwip_init();
+
+        }
+
+       /* your application goes here */
     }
 }
 
