@@ -72,7 +72,7 @@ static void app_init()
     or1k_interrupt_handler_add(ETH_INTERRUPT, &eth_mac_irq, 0);
     or1k_interrupt_enable(ETH_INTERRUPT);
 
-
+    *ISR = 0xFFFFFFFF; // Reset Interrupts
     *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
     printf("IER Register: %x\n", *IER);
 
@@ -123,10 +123,14 @@ void eth_mac_irq(void* arg)
         printf("eth_data_count %x\n", eth_data_count);
         int des_adr = *RDR;
         int i = 0;
-        eth_data = calloc(eth_data_count/4, sizeof(uint32_t));
+        eth_data = calloc(eth_data_count/4, sizeof(uint32_t)); // TODO: missing check for the buffer overflow
         for (i = 0; i < eth_data_count/4; i++) {
             eth_data[i] = swap_uint32(*RDFD);
+            //eth_data[i] = *RDFD;
+            //printf("got not swaped %x\n", eth_data[i]);
+            //eth_data[i] = swap_uint32(eth_data[i]);
             printf("got %x\n", eth_data[i]);
+            //printf("got back swaped %x\n", swap_uint32(eth_data[i]));
         }
     } else {
         printf("RDFO was empty+.\n");
@@ -164,7 +168,7 @@ static err_t
 netif_output(struct netif *netif, struct pbuf *p)
 {
   LINK_STATS_INC(link.xmit);
-
+  // TODO: Is this useful for us?
   /* Update SNMP stats (only if you use SNMP) */
   //MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
   //int unicast = ((p->payload[0] & 0x01) == 0);
@@ -173,24 +177,37 @@ netif_output(struct netif *netif, struct pbuf *p)
   //} else {
   //  MIB2_STATS_NETIF_INC(netif, ifinnucastpkts);
   //}
+  uint32_t TDFV_before = *TDFV;
+  printf("TDFV_before: %x\n", TDFV_before);
   printf("I am in netif_output.\n");
-  // void* mac_send_buffer = TDFD;
+  uint32_t restore_2 = or1k_critical_begin();
+  *TDR = (uint32_t) 0x00000002; // Destination Device Address
 
-  uint32_t restore = or1k_critical_begin();
-  *TDR = (uint32_t) 0x00000002;
   struct pbuf *q;
-  int left;
+  uint32_t left, tmp_len;
   for (left = 0; left < ((p->tot_len)/4); left = left + 1){
       *TDFD = ((uint32_t *)p->payload)[left];
       printf("p->payload now: %x\n", ((uint32_t *)p->payload)[left]);
   }
-  // u16_t tx_ct = pbuf_copy_partial(p, TDFD, p->tot_len, 0);
   /* Start MAC transmit here */
-  printf("p->len is: %x\n", p->len);
-  *TLR = (uint32_t) p->tot_len;
+
+  // Compare Transmit length and occupied storage in Stream FIFO
+  uint32_t TDFV_after = *TDFV;
+  printf("TDFV_after: %x\n", TDFV_after);
+  uint32_t buf_used = TDFV_before - TDFV_after; // used buffer in FIFO
+  if (4*buf_used == p->tot_len){
+      *TLR = p->tot_len;
+      printf("Length %x written to TLR\n", p->tot_len);
+  }
+  else{
+      //*TLR = 4*buf_used;
+      *TLR = p->tot_len;
+      printf("Length %x was wrong written is %x\n", p->tot_len, 4*buf_used);
+  }
   printf("ISR_value = %x\n", *ISR);
   *ISR = (unsigned int) 0xFFFFFFFF;
-  or1k_critical_end(restore);
+  printf("ISR_V after reset: %x\n", *ISR);
+  or1k_critical_end(restore_2);
 
   return ERR_OK;
 }
@@ -227,29 +244,28 @@ my_init(struct netif *netif)
 // generate a pbuf with data
 struct pbuf* gen_pbuf(u16_t len){
 	printf("I am in gen_pbuf.\n");
-	printf("len = %i\n", len);
 	uint32_t *eth_send = NULL;
-	eth_send = calloc(len/4, sizeof(uint32_t));
-	eth_send[0] = (uint32_t) 0x90e2ba46;
-	eth_send[1] = (uint32_t) 0x5a123456;
-	eth_send[2] = (uint32_t) 0x789abc08;
-	eth_send[3] = (uint32_t) 0x00450000;
-	eth_send[4] = (uint32_t) 0x24c24a40;
-	eth_send[5] = (uint32_t) 0x0040113e;
-	eth_send[6] = (uint32_t) 0x1781bb9b;
-	eth_send[7] = (uint32_t) 0x3781bb9b;
-	eth_send[8] = (uint32_t) 0xb1b041d5;
-	eth_send[9] = (uint32_t) 0xdf00103a;
-	eth_send[10] = (uint32_t) 0x81544346;
-	eth_send[11] = (uint32_t) 0x32040000;
-	eth_send[12] = (uint32_t) 0x000000;
-	printf("eth_data_send[0]: %x\n", eth_send[0]);
-        struct pbuf* tx_p = pbuf_alloc(PBUF_RAW, (u16_t) len, PBUF_RAM); // here maybe PBUF_RAM
+	eth_send = calloc(len/4, sizeof(uint32_t)); // TODO: missing check for the buffer overflow
+	eth_send[0] = (uint32_t) 0x9abc90e2;
+	eth_send[1] = (uint32_t) 0x12345678;
+	eth_send[2] = (uint32_t) 0xba465a14;
+	eth_send[3] = (uint32_t) 0x08004500;
+	eth_send[4] = (uint32_t) 0x0024c24a;
+	eth_send[5] = (uint32_t) 0x40004011;
+	eth_send[6] = (uint32_t) 0x3e1f81bb;
+	eth_send[7] = (uint32_t) 0x9b3781bb;
+	eth_send[8] = (uint32_t) 0x9bb1b041;
+	eth_send[9] = (uint32_t) 0xd5df0010;
+	eth_send[10] = (uint32_t) 0x3a815443;
+	eth_send[11] = (uint32_t) 0x46320400;
+	int i;
+	for (i = 0; i < 12; i++){
+	    eth_send[i] = swap_uint32(eth_send[i]);
+	}
+
+        struct pbuf* tx_p = pbuf_alloc(PBUF_RAW, (u16_t) len, PBUF_RAM);
 	pbuf_take(tx_p, (const void*) eth_send, len);
-
-	printf("p->payload: %x\n", *((uint32_t *)tx_p->payload));
-	printf("p->next: %x\n", tx_p->next); // only one element!
-
+	printf("generate a packet of length: 0x%x\n", tx_p->tot_len);
 	return tx_p;
 }
 
@@ -260,15 +276,9 @@ void init()
 
 void main(void)
 {
-    // struct pbuf* tx_p_try = pbuf_alloc(PBUF_RAW, (u16_t) 0x10, PBUF_RAM); // here maybe PBUF_RAM
-    //printf("Is allocated!\n");
-    // return;
-    app_init(); // ISR initialisieren
-    //queueInit(&queue, 30); // Queue initialisieren
     struct netif netif;
-
+    app_init();
     lwip_init();
-
     netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
               netif_input);
     netif.name[0] = 'e';
@@ -280,13 +290,16 @@ void main(void)
     netif_set_up(&netif);
 
     // All initialization done, we're ready to receive data
-    printf("init done, interrupts enabled\n");
+    printf("Init done, interrupts enabled\n");
     printf("IER Register: %x\n", *IER);
+
 
     /* Start DHCP and HTTPD */
     // dhcp_start(&netif );
     // httpd_init();
+
     int T_en = 1;
+
     while (1) {
         // TODO: Check link status
 
@@ -329,14 +342,9 @@ void main(void)
         // Transmit a packet
         if (T_en == 1) {
             // build a packet
-            *ISR = 0xFFFFFFFF;
-            u16_t tx_len = 0x33; // hex für 51
+            u16_t tx_len = 0x30; // packet length
             struct pbuf* p2 = gen_pbuf(tx_len);
-            // write the packet into the stream FIFO
-            printf("I am back in main (TX).\n");
-            printf("main: p2->payload is:%x\n", ((uint32_t *)p2->payload)[1]);
-            printf("main: p2->tot_len is: %i\n", p2->tot_len);
-            netif_output(&netif, p2);
+            netif_output(&netif, p2);// write the packet into the stream FIFO and activate the transmit
             T_en = 0;
             printf("Back in main after transmission.\n");
         }
