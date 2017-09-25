@@ -77,8 +77,6 @@ static void app_init()
     *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
     printf("IER Register: %x\n", *IER);
 
-    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
-
     or1k_timer_init(1000); // Hz == 1ms Timer tickets
 
     or1k_timer_enable();
@@ -137,6 +135,8 @@ void eth_mac_irq(void* arg)
     }
 
 
+
+    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
 
     /* Allocate pbuf from pool (avoid using heap in interrupts) */
     printf("eth_data_count %d\n", eth_data_count);
@@ -265,9 +265,11 @@ void init()
 
 void main(void)
 {
-    struct netif netif;
-    app_init();
     lwip_init();
+    app_init();
+
+    // sys_timeouts_init();
+    struct netif netif;
     netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
               netif_input);
     netif.name[0] = 'e';
@@ -290,14 +292,23 @@ void main(void)
     int T_en = 0;
     u32_t now = 0;
     u32_t last = 0;
+    optimsoc_list_iterator_t iter = 0;
+    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
     printf("ISR is at the beginning: %x\n", *ISR);
+    eth_rx_pbuf_queue = NULL;
+
     while (1) {
         // TODO: Check link status
 
         /* Check for received frames, feed them to lwIP */
-        if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0)
+        if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) //
         {
             printf("If was true.\n");
+            if (NULL == optimsoc_list_first_element(eth_rx_pbuf_queue, &iter)) {
+                printf("Element was NULL, return!\n");
+                eth_rx_pbuf_queue = NULL;
+            }
+            else{
             uint32_t restore = or1k_critical_begin();
             struct pbuf* p = (struct pbuf*) optimsoc_list_remove_head(eth_rx_pbuf_queue);
             or1k_critical_end(restore);
@@ -322,11 +333,16 @@ void main(void)
 
             if (netif.input(p, &netif) != ERR_OK) {
                 pbuf_free(p);
+                printf("pbuf is freed.\n");
             }
             else{
                 printf("sent payload to netif input\n");
-                // eth_rx_pbuf_queue = NULL;
+                printf("length of list: %i\n", optimsoc_list_length(eth_rx_pbuf_queue));
+                eth_rx_pbuf_queue = NULL;
             }
+            }
+            // sys_restart_timeouts();
+
         }
 
 
@@ -342,15 +358,7 @@ void main(void)
 
 
         /* Cyclic lwIP timers check */
-        now = sys_now();
-
-        if (now > 5000){
-            printf("Reinitalization.\n");
-            app_init();
-            lwip_init();
-
-        }
-
+        // sys_check_timeouts();
        /* your application goes here */
     }
 }
