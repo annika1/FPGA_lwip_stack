@@ -159,10 +159,6 @@ void eth_mac_irq(void* arg)
 
         optimsoc_list_iterator_t it;
         struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
-
-        printf("list length %x\n", optimsoc_list_length(eth_rx_pbuf_queue));
-        printf("list end: %x\n", eth_rx_pbuf_queue);
-        printf("equal NULL? : %i\n", eth_rx_pbuf_queue != NULL);
     }
     printf("end of ISR.\n");
 }
@@ -303,7 +299,6 @@ void main(void)
         /* Check for received frames, feed them to lwIP */
         if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) //
         {
-            printf("If was true.\n");
             if (NULL == optimsoc_list_first_element(eth_rx_pbuf_queue, &iter)) {
                 printf("Element was NULL, return!\n");
                 eth_rx_pbuf_queue = NULL;
@@ -325,12 +320,6 @@ void main(void)
              } else {
              MIB2_STATS_NETIF_INC(netif, ifoutnucastpkts);
              }*/
-            printf("netif flags: %x\n", netif.flags);
-            printf("Condition netif_input: %i\n", (netif.flags & (NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET)));
-            printf("p->len: %i\n", p->len);
-            printf("p->if_idx: %i\n", p->if_idx);
-
-
             if (netif.input(p, &netif) != ERR_OK) {
                 pbuf_free(p);
                 printf("pbuf is freed.\n");
@@ -356,21 +345,9 @@ void main(void)
             printf("Back in main after transmission.\n");
         }
 
-
+        for(int i=0; i<=100; i++); // For loop for busy waiting
         /* Cyclic lwIP timers check */
-        // sys_check_timeouts();
+       sys_check_timeouts();
        /* your application goes here */
     }
 }
-
-
-
-
-
-// REST
-
-
-
-
-
-
