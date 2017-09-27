@@ -1,7 +1,7 @@
 // NO_SYS_MAIN - Versuch 2
 
 // NO_SYS_main.c
-// Set up for receiving and transmitting ethernet packet with following specification
+// Set up for receiving and transmitting ethernet packet with following specification (done)
 // Link layer: Address Resolution Protocol (ARP) etharp
 // Internet layer: Internet Protocol (IP)
 // zuerst UDP (loopback: empfangen dann senden) dann TCP(loopback analog zu UDP, braucht vermutlich mehr timer)
@@ -22,16 +22,28 @@
 
 //#include "lwip/opt.h"
 #include "lwip/init.h"
+
+#include "lwip/debug.h"
+
+#include "lwip/sys.h"
+#include "lwip/timeouts.h"
+
 #include "lwip/stats.h"
+
+#include "lwip/udp.h"
+#include "lwip/etharp.h"
+
 #include "lwip/pbuf.h"
 #include "lwip/raw.h"
 #include "netif/ethernet.h"
 #include "lwip/pbuf.h"
 #include "lwip/ip_addr.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/netif.h"
+
+
 // #include "lwip/netif.h" included in ethernet.h
 
-#include "lwip/timeouts.h"
-#include "lwip/sys.h"
 //#include "queue.h"
 
 
@@ -42,6 +54,7 @@
 int mymac[6] = {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc};
 const void* MYMACADDRESS = &mymac;
 
+unsigned char debug_flags;
 
 
 unsigned int volatile * const ISR   = (unsigned int *) (FIFO_BASE + 0x00000000);
@@ -63,6 +76,9 @@ unsigned int volatile * const RDR   = (unsigned int *) (FIFO_BASE + 0x00000030);
 // Incoming packet queue
 struct optimsoc_list_t *eth_rx_pbuf_queue = NULL;
 
+/* (manual) host IP configuration */
+static ip4_addr_t ipaddr, netmask, gw;
+
 
 void eth_mac_irq(void* arg);
 
@@ -75,7 +91,7 @@ static void app_init()
 
     *ISR = 0xFFFFFFFF; // Reset Interrupts
     *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
-    printf("IER Register: %x\n", *IER);
+    printf("app_init: IER Register: %x\n", *IER);
 
     or1k_timer_init(1000); // Hz == 1ms Timer tickets
 
@@ -104,21 +120,21 @@ void eth_mac_irq(void* arg)
     u16_t eth_data_count = 0;
 
     if (!(ISR_V & 0x4000000)) {
-        printf("got interrupt_v %x\n", ISR_V);
+        printf("eth_mac_irq: got interrupt_v %x\n", ISR_V);
         *ISR = 0xFFFFFFFF;
         return;
     }
 
 
-    printf("Receive Complete Bit active.\n");
-    printf("ISR is %p\n", *ISR);
+    printf("eth_mac_irq: Receive Complete Bit active.\n");
+    printf("eth_mac_irq: ISR is %p\n", *ISR);
     *ISR = 0xFFFFFFFF;
     uint32_t RDFO_V = *RDFO;
 
     if (RDFO_V > 0) {
-        printf("Received Bytes are in the buffer.\n");
+        printf("eth_mac_irq: Received Bytes are in the buffer.\n");
         eth_data_count = *RLR; // don't write u16_t in front!
-        printf("eth_data_count %x\n", eth_data_count);
+        printf("eth_mac_irq: eth_data_count %x\n", eth_data_count);
         int des_adr = *RDR;
         int i = 0;
         eth_data = calloc(eth_data_count/4, sizeof(uint32_t)); // TODO: missing check for the buffer overflow
@@ -127,11 +143,11 @@ void eth_mac_irq(void* arg)
             //eth_data[i] = *RDFD;
             //printf("got not swaped %x\n", eth_data[i]);
             //eth_data[i] = swap_uint32(eth_data[i]);
-            printf("got %x\n", eth_data[i]);
+            printf("eth_mac_irq: got %x\n", eth_data[i]);
             //printf("got back swaped %x\n", swap_uint32(eth_data[i]));
         }
     } else {
-        printf("RDFO was empty+.\n");
+        printf("eth_mac_irq: RDFO was empty+.\n");
     }
 
 
@@ -139,20 +155,20 @@ void eth_mac_irq(void* arg)
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
 
     /* Allocate pbuf from pool (avoid using heap in interrupts) */
-    printf("eth_data_count %d\n", eth_data_count);
+    printf("eth_mac_irq: eth_data_count %d\n", eth_data_count);
     struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
-    printf("allocation of p at %p\n", p);
+    printf("eth_mac_irq: allocation of p at %p\n", p);
 
     if (p != NULL) {
         /* Copy ethernet frame into pbuf */
         err_t rv;
         rv = pbuf_take(p, (const void*) eth_data, eth_data_count);
         if (rv != ERR_OK) {
-            printf("pbuf_take() FAILED returned %d\n", rv);
+            printf("eth_mac_irq: pbuf_take() FAILED returned %d\n", rv);
         }
         free(eth_data);
 
-        printf("putting data into optimsoc buffer\n");
+        printf("eth_mac_irq: putting data into optimsoc buffer\n");
 
         /* Put in a queue which is processed in main loop */
         optimsoc_list_add_tail(eth_rx_pbuf_queue, p);
@@ -160,7 +176,6 @@ void eth_mac_irq(void* arg)
         optimsoc_list_iterator_t it;
         struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
     }
-    printf("end of ISR.\n");
 }
 
 static err_t 
@@ -178,28 +193,30 @@ netif_output(struct netif *netif, struct pbuf *p)
   //  MIB2_STATS_NETIF_INC(netif, ifinnucastpkts);
   //}
 
-  printf("Writing to Stream FIFO and start transmission.\n");
+  printf("netif_output: Writing to Stream FIFO and start transmission.\n");
   uint32_t TDFV_before = *TDFV;
-  printf("TDFV_before: %x\n", TDFV_before);
+  printf("netif_output: TDFV_before: %x\n", TDFV_before);
   uint32_t restore_2 = or1k_critical_begin();
   *TDR = (uint32_t) 0x00000002; // Destination Device Address
-
-  struct pbuf *q;
   uint32_t left, tmp_len;
-  for (left = 0; left < ((p->tot_len)/4); left = left + 1){
-      *TDFD = swap_uint32(((uint32_t *)p->payload)[left]);
-      printf("p->payload now: %x\n", swap_uint32(((uint32_t *)p->payload)[left]));
+  uint32_t buf_p = 0x0;
+  for (left = 0; left < ((p->tot_len)/2); left = left + 2){
+      buf_p = ((uint16_t *)p->payload)[left];
+      buf_p = buf_p << 16;
+      buf_p = buf_p | ((uint16_t *)p->payload)[left+1];
+      *TDFD = swap_uint32(buf_p);
+      printf("netif_output: p->payload now: %x\n", swap_uint32(buf_p));
   }
   /* Start MAC transmit here */
   // Compare Transmit length and occupied storage in Stream FIFO
   uint32_t TDFV_after = *TDFV;
-  printf("TDFV_after: %x\n", TDFV_after);
+  printf("netif_output: TDFV_after: %x\n", TDFV_after);
   uint32_t buf_used = TDFV_before - TDFV_after; // used buffer in FIFO
   *TLR = p->tot_len;
-  printf("Length %x written to TLR\n", p->tot_len);
-  printf("ISR_value = %x\n", *ISR);
+  printf("netif_output: Length %x written to TLR\n", p->tot_len);
+  printf("netif_output: ISR_value = %x\n", *ISR);
   *ISR = (unsigned int) 0xFFFFFFFF;
-  printf("ISR_V after reset: %x\n", *ISR);
+  printf("netif_output: ISR_V after reset: %x\n", *ISR);
   or1k_critical_end(restore_2);
   return ERR_OK;
 }
@@ -208,20 +225,14 @@ static void
 netif_status_callback(struct netif *netif)
 {
   // printf("netif status changed %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
-	printf("netif status changed.\n");
-}
-
-err_t my_output()
-{
-	printf("trying to send packet\n");
-	return 0;
+	printf("netif_status_callback: netif status changed.\n");
 }
 
 static err_t 
 my_init(struct netif *netif)
 {
   netif->linkoutput = netif_output;
-  netif->output     = my_output;
+  netif->output     = etharp_output;
   // netif->output_ip6 = ethip6_output;
   // netif->mtu        = ETHERNET_MTU;
   netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
@@ -229,7 +240,6 @@ my_init(struct netif *netif)
 
   SMEMCPY(netif->hwaddr, MYMACADDRESS, sizeof(netif->hwaddr));
   netif->hwaddr_len = sizeof(netif->hwaddr);
-
   return ERR_OK;
 }
 
@@ -250,7 +260,7 @@ struct pbuf* gen_pbuf(u16_t len){
 	eth_send[11] = (uint32_t) 0x46320400;
         struct pbuf* tx_p = pbuf_alloc(PBUF_RAW, (u16_t) len, PBUF_RAM);
 	pbuf_take(tx_p, (const void*) eth_send, len);
-	printf("generate a packet of length: 0x%x\n", tx_p->tot_len);
+	printf("gen_pbuf: generate a packet of length: 0x%x\n", tx_p->tot_len);
 	return tx_p;
 }
 
@@ -259,17 +269,63 @@ void init()
 
 }
 
+static struct udp_pcb *udpecho_raw_pcb;
+
+static void
+udpecho_raw_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p,
+                 const ip_addr_t *addr, u16_t port)
+{
+  LWIP_UNUSED_ARG(arg);
+  if (p != NULL) {
+    /* send received packet back to sender */
+    udp_sendto(upcb, p, addr, port);
+    /* free the pbuf */
+    printf("udpecho_raw_recv: free p\n");
+    pbuf_free(p);
+  }
+}
+
+void
+udp_my_init(void){
+    udpecho_raw_pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
+    if (udpecho_raw_pcb != NULL) {
+        err_t err;
+
+        err = udp_bind(udpecho_raw_pcb, IP_ANY_TYPE, 54751);
+        if (err == ERR_OK) {
+          udp_recv(udpecho_raw_pcb, udpecho_raw_recv, NULL);
+        } else {
+          /* abort? output diagnostic? */
+        }
+      } else {
+        /* abort? output diagnostic? */
+      }
+}
+
+
+
+
 void main(void)
 {
-    lwip_init();
     app_init();
-
-    // sys_timeouts_init();
     struct netif netif;
-    netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
+
+    // startup defaults (may be overridden by one or more opts)
+    IP4_ADDR(&gw, 129,187,155,1);
+    IP4_ADDR(&ipaddr, 129,187,155,177); // C0 BB 9B C7
+    IP4_ADDR(&netmask, 255,255,255,0);
+
+    lwip_init();
+
+    netif_add(&netif, &ipaddr, &netmask, &gw, NULL, my_init,
               netif_input);
+    //printf("main: ip_addr: %i\n", (&ipaddr)->addr);
+    //printf("main: netif_addr: %i\n", (&(&netif)->ip_addr)->addr);
+    //printf("main: pointer to address: %i\n", netif.ip_addr);
+
     netif.name[0] = 'e';
     netif.name[1] = '0';
+
     //netif_create_ip6_linklocal_address(&netif, 1);
     //netif.ip6_autoconfig_enabled = 1;
     netif_set_status_callback(&netif, netif_status_callback);
@@ -277,9 +333,8 @@ void main(void)
     netif_set_up(&netif);
 
     // All initialization done, we're ready to receive data
-    printf("Reset done, Init done, interrupts enabled\n");
-    printf("IER Register: %x\n", *IER);
-
+    printf("main: Reset done, Init done, interrupts enabled\n");
+    printf("main: IER Register: %x\n", *IER);
 
     /* Start DHCP and HTTPD */
     // dhcp_start(&netif );
@@ -290,8 +345,14 @@ void main(void)
     u32_t last = 0;
     optimsoc_list_iterator_t iter = 0;
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
-    printf("ISR is at the beginning: %x\n", *ISR);
+    printf("main: ISR is at the beginning: %x\n", *ISR);
     eth_rx_pbuf_queue = NULL;
+
+    udp_my_init();
+    udp_bind_netif(udpecho_raw_pcb, &netif);
+
+
+    debug_flags |= (LWIP_DBG_ON|LWIP_DBG_TRACE|LWIP_DBG_STATE|LWIP_DBG_FRESH|LWIP_DBG_HALT);
 
     while (1) {
         // TODO: Check link status
@@ -300,7 +361,7 @@ void main(void)
         if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) //
         {
             if (NULL == optimsoc_list_first_element(eth_rx_pbuf_queue, &iter)) {
-                printf("Element was NULL, return!\n");
+                printf("main: Element was NULL, return!\n");
                 eth_rx_pbuf_queue = NULL;
             }
             else{
@@ -308,9 +369,8 @@ void main(void)
             struct pbuf* p = (struct pbuf*) optimsoc_list_remove_head(eth_rx_pbuf_queue);
             or1k_critical_end(restore);
 
-            printf("got packet on main thread from pbuf\n");
-            printf("something: %x\n", *((unsigned long *)(p->payload)));
             LINK_STATS_INC(link.recv);
+
             /* Update SNMP stats (only if you use SNMP) */
             // TODO: see if that's useful for us
             /*MIB2_STATS_NETIF_ADD(netif, ifoutoctets, p->tot_len);
@@ -320,17 +380,20 @@ void main(void)
              } else {
              MIB2_STATS_NETIF_INC(netif, ifoutnucastpkts);
              }*/
+
+            // TODO: activate the checksum test
+
             if (netif.input(p, &netif) != ERR_OK) {
                 pbuf_free(p);
-                printf("pbuf is freed.\n");
+                printf("main: pbuf is freed, error occurred.\n");
             }
             else{
-                printf("sent payload to netif input\n");
-                printf("length of list: %i\n", optimsoc_list_length(eth_rx_pbuf_queue));
+                printf("main: sent payload to netif input\n");
+                printf("main: length of list: %i\n", optimsoc_list_length(eth_rx_pbuf_queue));
                 eth_rx_pbuf_queue = NULL;
+                printf("main: ISR is: %x\n", *ISR);
             }
             }
-            // sys_restart_timeouts();
 
         }
 
@@ -342,12 +405,45 @@ void main(void)
             struct pbuf* p2 = gen_pbuf(tx_len);
             netif_output(&netif, p2);// write the packet into the stream FIFO and activate the transmit
             T_en = 0;
-            printf("Back in main after transmission.\n");
+            printf("main: Back in main after transmission.\n");
         }
 
-        for(int i=0; i<=100; i++); // For loop for busy waiting
+
+        for(int i=0; i<=1000000; i++); // For loop for busy waiting
+
         /* Cyclic lwIP timers check */
        sys_check_timeouts();
        /* your application goes here */
     }
 }
+
+
+
+/*
+ * REST
+ *
+ *
+     char ip_str[16] = {0}, nm_str[16] = {0}, gw_str[16] = {0};
+    /* startup defaults (may be overridden by one or more opts)
+    IP4_ADDR(&gw, 192,187,155,1);
+    IP4_ADDR(&ipaddr, 192,187,155,199);
+    IP4_ADDR(&netmask, 255,255,255,0);
+
+    strncpy(ip_str, ip4addr_ntoa(&ipaddr), sizeof(ip_str));
+    strncpy(nm_str, ip4addr_ntoa(&netmask), sizeof(nm_str));
+    strncpy(gw_str, ip4addr_ntoa(&gw), sizeof(gw_str));
+    printf("Host at %s mask %s gateway %s\n", ip_str, nm_str, gw_str);
+ *
+  /* old for loop */
+  //for (left = 0; left < ((p->tot_len)/4); left = left + 1){
+      //*TDFD = swap_uint32(((uint32_t *)p->payload)[left]);
+
+  //printf("p->payload now: %x\n", swap_uint32(((uint32_t *)p->payload)[left]));
+  /* end old for loop
+
+
+
+
+ */
+
+

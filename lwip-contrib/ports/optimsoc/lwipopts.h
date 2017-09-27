@@ -186,6 +186,8 @@
    ---------- IP options ----------
    --------------------------------
 */
+#define LWIP_IPV4                       1
+#define LWIP_IPV6                       0
 /**
  * IP_FORWARD==1: Enables the ability to forward IP packets across network
  * interfaces. If you are going to run lwIP on a device with only one network
@@ -407,17 +409,24 @@
 
 #define LWIP_NETIF_STATUS_CALLBACK 1
 
+
+
+#define CHECKSUM_CHECK_IP               0
+#define CHECKSUM_CHECK_UDP              0
+
 /*
    ---------------------------------------
    ---------- Debugging options ----------
    ---------------------------------------
 */
 
+#define LWIP_DEBUG                      1
+
 #define TAPIF_DEBUG      LWIP_DBG_ON
-#define TUNIF_DEBUG      LWIP_DBG_OFF
-#define UNIXIF_DEBUG     LWIP_DBG_OFF
-#define DELIF_DEBUG      LWIP_DBG_OFF
-#define SIO_FIFO_DEBUG   LWIP_DBG_OFF
+#define TUNIF_DEBUG      LWIP_DBG_ON // off
+#define UNIXIF_DEBUG     LWIP_DBG_ON // off
+#define DELIF_DEBUG      LWIP_DBG_ON // off
+#define SIO_FIFO_DEBUG   LWIP_DBG_ON // off
 #define TCPDUMP_DEBUG    LWIP_DBG_ON
 #define API_LIB_DEBUG    LWIP_DBG_ON
 #define API_MSG_DEBUG    LWIP_DBG_ON
@@ -439,6 +448,7 @@
 #define TCP_FR_DEBUG     LWIP_DBG_ON
 #define TCP_QLEN_DEBUG   LWIP_DBG_ON
 #define TCP_RST_DEBUG    LWIP_DBG_ON
+#define ETHARP_DEBUG     LWIP_DBG_ON // added by Annika
 
 extern unsigned char debug_flags;
 #define LWIP_DBG_TYPES_ON debug_flags
