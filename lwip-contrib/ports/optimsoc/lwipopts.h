@@ -407,12 +407,13 @@
  */
 #define LWIP_STATS                      1
 
-#define LWIP_NETIF_STATUS_CALLBACK 1
+#define LWIP_NETIF_STATUS_CALLBACK      1
 
 
 
 #define CHECKSUM_CHECK_IP               0
 #define CHECKSUM_CHECK_UDP              0
+#define CHECKSUM_CHECK_TCP              0
 
 /*
    ---------------------------------------

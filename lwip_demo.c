@@ -42,7 +42,6 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 
-#include "ping.h"
 // #include "lwip/netif.h" included in ethernet.h
 
 //#include "queue.h"
