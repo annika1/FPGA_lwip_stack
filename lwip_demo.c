@@ -47,16 +47,19 @@
 #include "lwip/inet_chksum.h"
 
 
-
-
-// Interrupt Service Routine initialisieren
+/*
+ * Initialisation of the FPGA
+ * - Interrupt handler
+ * - Timer
+ * - Clear ISR Register and Enable Interrupts in IER
+ */
 static void app_init()
 {
     or1k_interrupt_handler_add(ETH_INTERRUPT, &eth_mac_irq, 0);
     or1k_interrupt_enable(ETH_INTERRUPT);
 
-    *ISR = 0xFFFFFFFF; // Reset Interrupts
-    *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
+    *ISR = 0xFFFFFFFF;
+    *IER = 0x0C000000;
 
     printf("app_init: IER Register: %x\n", *IER);
     or1k_timer_init(1000); // Hz == 1ms Timer tickets
@@ -70,16 +73,16 @@ uint32_t swap_uint32( uint32_t val )
     return (val << 16) | (val >> 16);
 }
 
-
 /**
- * Interrupt Service Routine: New packet has been received
+ * Interrupt Service Routine:
+ * - New packet has been received
+ * - Check the bits if receiving was successful (RDFO, RLR, RDR)
+ * - Reading the Stream FIFO Register RDFD into the generated pbuf buffer
+ * - List Element in the queue eth_rx_pbuf_queue
  */
 void eth_mac_irq(void* arg)
 {
-    (void) arg; // unused argument
     long ISR_V = *ISR;
-    // Read the input into eth_data and the length into eth_data_count
-    // Receive access
     uint32_t *eth_data = NULL;
     u16_t eth_data_count = 0;
 
@@ -101,42 +104,33 @@ void eth_mac_irq(void* arg)
         printf("eth_mac_irq: eth_data_count %x\n", eth_data_count);
         int des_adr = *RDR;
         int i = 0;
-        eth_data = calloc(eth_data_count/4, sizeof(uint32_t)); // TODO: missing check for the buffer overflow
+        eth_data = calloc(eth_data_count/4, sizeof(uint32_t));
+        if (eth_data == NULL){
+            printf("eth_mac_irq: Buffer Overflow by generating eth_data.\n");
+            return;
+        }
         for (i = 0; i < eth_data_count/4; i++) {
             eth_data[i] = swap_uint32(*RDFD);
-            //eth_data[i] = *RDFD;
-            //printf("got not swaped %x\n", eth_data[i]);
-            //eth_data[i] = swap_uint32(eth_data[i]);
             printf("eth_mac_irq: got %x\n", eth_data[i]);
-            //printf("got back swaped %x\n", swap_uint32(eth_data[i]));
         }
     } else {
         printf("eth_mac_irq: RDFO was empty+.\n");
     }
 
-
-
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
-
-    /* Allocate pbuf from pool (avoid using heap in interrupts) */
-    printf("eth_mac_irq: eth_data_count %d\n", eth_data_count);
     struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
-    printf("eth_mac_irq: allocation of p at %p\n", p);
+    printf("eth_mac_irq: allocation of p at %p\n of size %d\n", p,
+           eth_data_count);
 
     if (p != NULL) {
-        /* Copy ethernet frame into pbuf */
         err_t rv;
         rv = pbuf_take(p, (const void*) eth_data, eth_data_count);
         if (rv != ERR_OK) {
             printf("eth_mac_irq: pbuf_take() FAILED returned %d\n", rv);
         }
         free(eth_data);
-
-        printf("eth_mac_irq: putting data into optimsoc buffer\n");
-
         /* Put in a queue which is processed in main loop */
         optimsoc_list_add_tail(eth_rx_pbuf_queue, p);
-
         optimsoc_list_iterator_t it;
         struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
     }
