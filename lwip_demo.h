@@ -37,4 +37,8 @@ struct optimsoc_list_t *eth_rx_pbuf_queue = NULL;
 static ip4_addr_t ipaddr, netmask, gw;
 void eth_mac_irq(void* arg);
 
+
+
+
+
 #endif
