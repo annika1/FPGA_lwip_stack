@@ -21,6 +21,7 @@
 #include <optimsoc-runtime.h>
 
 //#include "lwip/opt.h"
+#include "lwip_demo.h"
 #include "lwip/init.h"
 
 #include "lwip/debug.h"
@@ -39,7 +40,6 @@
 #include "netif/ethernet.h"
 #include "lwip/pbuf.h"
 #include "lwip/ip_addr.h"
-#include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
 
@@ -47,45 +47,6 @@
 #include "lwip/inet_chksum.h"
 
 
-// #include "lwip/netif.h" included in ethernet.h
-
-//#include "queue.h"
-
-
-#define ETH_INTERRUPT 4
-#define ESS_BASE 0xD0000000
-#define FIFO_BASE 0xC0000000
-// Definition MAC Address
-int mymac[6] = {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc};
-const void* MYMACADDRESS = &mymac;
-
-unsigned char debug_flags;
-
-
-unsigned int volatile * const ISR   = (unsigned int *) (FIFO_BASE + 0x00000000);
-unsigned int volatile * const IER   = (unsigned int *) (FIFO_BASE + 0x00000004);
-unsigned int volatile * const TDFR   = (unsigned int *) (FIFO_BASE + 0x00000008);
-unsigned int volatile * const TDFV  = (unsigned int *) (FIFO_BASE + 0x0000000C);
-unsigned int * const TDFD  = (unsigned int *) (FIFO_BASE + 0x00000010);
-unsigned int volatile * const TLR   = (unsigned int *) (FIFO_BASE + 0x00000014);
-unsigned int volatile * const RDFR  = (unsigned int *) (FIFO_BASE + 0x00000018);
-unsigned int volatile * const RDFO  = (unsigned int *) (FIFO_BASE + 0x0000001C);
-unsigned int volatile * const RDFD  = (unsigned int *) (FIFO_BASE + 0x00000020);
-unsigned int volatile * const RLR   = (unsigned int *) (FIFO_BASE + 0x00000024);
-unsigned int volatile * const SRR   = (unsigned int *) (FIFO_BASE + 0x00000028);
-unsigned int volatile * const TDR   = (unsigned int *) (FIFO_BASE + 0x0000002C);
-unsigned int volatile * const RDR   = (unsigned int *) (FIFO_BASE + 0x00000030);
-
-//Queue queue; // initalisieren von queue;
-
-// Incoming packet queue
-struct optimsoc_list_t *eth_rx_pbuf_queue = NULL;
-
-/* (manual) host IP configuration */
-static ip4_addr_t ipaddr, netmask, gw;
-
-
-void eth_mac_irq(void* arg);
 
 
 // Interrupt Service Routine initialisieren
@@ -96,12 +57,10 @@ static void app_init()
 
     *ISR = 0xFFFFFFFF; // Reset Interrupts
     *IER = 0x0C000000; // Enable ISR for: Receive Complete (with Transmit Compl. is 0xC000000
+
     printf("app_init: IER Register: %x\n", *IER);
-
     or1k_timer_init(1000); // Hz == 1ms Timer tickets
-
     or1k_timer_enable();
-
     or1k_interrupts_enable();
 }
 
@@ -213,7 +172,7 @@ netif_output(struct netif *netif, struct pbuf *p)
       if (left < 31){
           printf("netif_output: p->payload now: %x\n", swap_uint32(buf_p));
       }
-      if (left == 31){
+      if (left > 30 && left < 34){
           printf("Output more than 120Bytes - stop printing it.\n");
       }
   }
@@ -573,21 +532,21 @@ void main(void)
 
     // startup defaults (may be overridden by one or more opts)
     // UDP Test Packet
-    //IP4_ADDR(&gw, 129,187,155,1);
-    //IP4_ADDR(&ipaddr, 129,187,155,177);
+    IP4_ADDR(&gw, 129,187,155,1);
+    IP4_ADDR(&ipaddr, 129,187,155,177);
     // TCP Test Packet
 
-/*
-    IP4_ADDR(&gw, 10,162,229,1);
-    IP4_ADDR(&ipaddr, 10,162,229,2);
+
+    //IP4_ADDR(&gw, 10,162,229,1);
+    //IP4_ADDR(&ipaddr, 10,162,229,2);
 
     IP4_ADDR(&netmask, 255,255,255,0);
     netif_add(&netif, &ipaddr, &netmask, &gw, NULL, my_init,
               netif_input);
-*/
 
-    netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
-             netif_input );
+
+    //netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
+    //         netif_input );
 
     //printf("main: ip_addr: %i\n", (&ipaddr)->addr);
     //printf("main: netif_addr: %i\n", (&(&netif)->ip_addr)->addr);
@@ -607,10 +566,7 @@ void main(void)
     printf("main: IER Register: %x\n", *IER);
 
 
-
-
-
-    int T_en = 0;
+    int T_en = 1;
     u32_t now = 0;
     u32_t last = 0;
     optimsoc_list_iterator_t iter = 0;
@@ -623,13 +579,13 @@ void main(void)
     udp_bind_netif(udpecho_raw_pcb, &netif);
 #endif // LWIP_UDP
 #if LWIP_DEBUG
-    debug_flags |= (LWIP_DBG_ON|LWIP_DBG_TRACE|LWIP_DBG_STATE|LWIP_DBG_FRESH|LWIP_DBG_HALT);
+    debug_flags |= (LWIP_DBG_ON|LWIP_DBG_TRACE|LWIP_DBG_STATE|LWIP_DBG_FRESH|LWIP_DBG_HALT|LWIP_DBG_TRACE);
 #endif //LWIP_DEBUG
     printf("netif->mtu: %i\n", netif.mtu);
    /*
    * DHCP Init
    */
-
+#if LWIP_DHCP
     err_t error_dhcp;
     /* Start DHCP and HTTPD */
     error_dhcp = dhcp_start(&netif);
@@ -641,15 +597,17 @@ void main(void)
         printf("DHCP started.\n");
         u8_t myip_dhcp;
         myip_dhcp = dhcp_supplied_address(&netif);
-        printf("ip address now: %x\n", myip_dhcp);
+        printf("main: ip address now: %x\n", myip_dhcp);
     }
     // httpd_init();
-
+#endif // LWIP_DHCP
 
 #if LWIP_TCP
     tcpecho_raw_init();
     tcp_bind_netif(tcpecho_raw_pcb, &netif);
 #endif // LWIP_TCP
+
+    // netif_set_link_up(&netif);
 
     while (1) {
         // TODO: Check link status

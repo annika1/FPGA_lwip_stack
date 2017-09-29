@@ -277,7 +277,7 @@
 /**
  * LWIP_DHCP==1: Enable DHCP module.
  */
-#define LWIP_DHCP                       1
+#define LWIP_DHCP                       0 // 1
 
 /*
    ------------------------------------
@@ -458,7 +458,7 @@
 #define TCP_FR_DEBUG     LWIP_DBG_ON
 #define TCP_QLEN_DEBUG   LWIP_DBG_ON
 #define TCP_RST_DEBUG    LWIP_DBG_ON
-#define ETHARP_DEBUG     LWIP_DBG_OFF // added by Annika
+#define ETHARP_DEBUG     LWIP_DBG_ON // added by Annika
 #define DHCP_DEBUG       LWIP_DBG_ON
 
 extern unsigned char debug_flags;
