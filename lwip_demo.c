@@ -41,6 +41,11 @@
 #include "lwip/ip_addr.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
+#include "lwip/dhcp.h"
+
+// #include "ping.h"
+#include "lwip/inet_chksum.h"
+
 
 // #include "lwip/netif.h" included in ethernet.h
 
@@ -205,7 +210,12 @@ netif_output(struct netif *netif, struct pbuf *p)
       buf_p = buf_p << 16;
       buf_p = buf_p | ((uint16_t *)p->payload)[left+1];
       *TDFD = swap_uint32(buf_p);
-      printf("netif_output: p->payload now: %x\n", swap_uint32(buf_p));
+      if (left < 31){
+          printf("netif_output: p->payload now: %x\n", swap_uint32(buf_p));
+      }
+      if (left == 31){
+          printf("Output more than 120Bytes - stop printing it.\n");
+      }
   }
   /* Start MAC transmit here */
   // Compare Transmit length and occupied storage in Stream FIFO
@@ -234,7 +244,7 @@ my_init(struct netif *netif)
   netif->linkoutput = netif_output;
   netif->output     = etharp_output;
   // netif->output_ip6 = ethip6_output;
-  // netif->mtu        = ETHERNET_MTU;
+  netif->mtu        = ETHERNET_MTU;
   netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
   // MIB2_INIT_NETIF(netif, snmp_ifType_ethernet_csmacd, 100000000);
 
@@ -555,26 +565,30 @@ tcpecho_raw_init(void)
 }
 #endif // LWIP_TCP
 
-
 void main(void)
 {
     app_init();
+    lwip_init();
     struct netif netif;
 
     // startup defaults (may be overridden by one or more opts)
     // UDP Test Packet
     //IP4_ADDR(&gw, 129,187,155,1);
-    // IP4_ADDR(&ipaddr, 129,187,155,177);
+    //IP4_ADDR(&ipaddr, 129,187,155,177);
     // TCP Test Packet
+
+/*
     IP4_ADDR(&gw, 10,162,229,1);
     IP4_ADDR(&ipaddr, 10,162,229,2);
 
     IP4_ADDR(&netmask, 255,255,255,0);
-
-    lwip_init();
-
     netif_add(&netif, &ipaddr, &netmask, &gw, NULL, my_init,
               netif_input);
+*/
+
+    netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
+             netif_input );
+
     //printf("main: ip_addr: %i\n", (&ipaddr)->addr);
     //printf("main: netif_addr: %i\n", (&(&netif)->ip_addr)->addr);
     //printf("main: pointer to address: %i\n", netif.ip_addr);
@@ -592,9 +606,9 @@ void main(void)
     printf("main: Reset done, Init done, interrupts enabled\n");
     printf("main: IER Register: %x\n", *IER);
 
-    /* Start DHCP and HTTPD */
-    // dhcp_start(&netif );
-    // httpd_init();
+
+
+
 
     int T_en = 0;
     u32_t now = 0;
@@ -611,15 +625,31 @@ void main(void)
 #if LWIP_DEBUG
     debug_flags |= (LWIP_DBG_ON|LWIP_DBG_TRACE|LWIP_DBG_STATE|LWIP_DBG_FRESH|LWIP_DBG_HALT);
 #endif //LWIP_DEBUG
+    printf("netif->mtu: %i\n", netif.mtu);
+   /*
+   * DHCP Init
+   */
+
+    err_t error_dhcp;
+    /* Start DHCP and HTTPD */
+    error_dhcp = dhcp_start(&netif);
+    if (error_dhcp != ERR_OK){
+        printf("DHCP Error occurred - out of memory.\n");
+    }
+    else
+    {
+        printf("DHCP started.\n");
+        u8_t myip_dhcp;
+        myip_dhcp = dhcp_supplied_address(&netif);
+        printf("ip address now: %x\n", myip_dhcp);
+    }
+    // httpd_init();
+
 
 #if LWIP_TCP
     tcpecho_raw_init();
     tcp_bind_netif(tcpecho_raw_pcb, &netif);
 #endif // LWIP_TCP
-
-#if LWIP_RAW
-    ping_init(&ipaddr);
-#endif // LWIP_RAW
 
     while (1) {
         // TODO: Check link status
@@ -709,6 +739,135 @@ void main(void)
   /* end old for loop
 
 
+/*
+ * PING TCP Interface
+
+* Prepare a echo ICMP request
+*
+* #if LWIP_RAW
+    //IP4_ADDR(&myip, 129, 187, 155, 55);
+    //ping_init(&ipaddr);
+#endif // LWIP_RAW
+
+static void
+ping_prepare_echo( struct icmp_echo_hdr *iecho, u16_t len)
+{
+  size_t i;
+  size_t data_len = len - sizeof(struct icmp_echo_hdr);
+
+  ICMPH_TYPE_SET(iecho, ICMP_ECHO);
+  ICMPH_CODE_SET(iecho, 0);
+  iecho->chksum = 0;
+  iecho->id     = PING_ID;
+  iecho->seqno  = lwip_htons(++ping_seq_num);
+
+   fill the additional data buffer with some data
+  for(i = 0; i < data_len; i++) {
+    ((char*)iecho)[sizeof(struct icmp_echo_hdr) + i] = (char)i;
+  }
+
+  iecho->chksum = inet_chksum(iecho, len);
+}
+ Ping using the raw ip
+static u8_t
+ping_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p, const ip_addr_t *addr)
+{
+  struct icmp_echo_hdr *iecho;
+  LWIP_UNUSED_ARG(arg);
+  LWIP_UNUSED_ARG(pcb);
+  LWIP_UNUSED_ARG(addr);
+  LWIP_ASSERT("p != NULL", p != NULL);
+
+  if ((p->tot_len >= (PBUF_IP_HLEN + sizeof(struct icmp_echo_hdr))) &&
+      pbuf_remove_header(p, PBUF_IP_HLEN) == 0) {
+    iecho = (struct icmp_echo_hdr *)p->payload;
+
+    if ((iecho->id == PING_ID) && (iecho->seqno == lwip_htons(ping_seq_num))) {
+      LWIP_DEBUGF( PING_DEBUG, ("ping: recv "));
+      ip_addr_debug_print(PING_DEBUG, addr);
+      LWIP_DEBUGF( PING_DEBUG, (" %"U32_F" ms\n", (sys_now()-ping_time)));
+
+       do some ping result processing
+      PING_RESULT(1);
+      pbuf_free(p);
+      return 1;  eat the packet
+    }
+     not eaten, restore original packet
+    pbuf_add_header(p, PBUF_IP_HLEN);
+  }
+
+  return 0;  don't eat the packet
+}
+static void
+ping_send(struct raw_pcb *raw, ip_addr_t *addr)
+{
+  struct pbuf *p;
+  struct icmp_echo_hdr *iecho;
+  size_t ping_size = sizeof(struct icmp_echo_hdr) + PING_DATA_SIZE;
+
+  LWIP_DEBUGF( PING_DEBUG, ("ping: send "));
+  ip_addr_debug_print(PING_DEBUG, addr);
+  LWIP_DEBUGF( PING_DEBUG, ("\n"));
+  LWIP_ASSERT("ping_size <= 0xffff", ping_size <= 0xffff);
+
+  p = pbuf_alloc(PBUF_IP, (u16_t)ping_size, PBUF_RAM);
+  if (!p) {
+    return;
+  }
+  if ((p->len == p->tot_len) && (p->next == NULL)) {
+    iecho = (struct icmp_echo_hdr *)p->payload;
+
+    ping_prepare_echo(iecho, (u16_t)ping_size);
+
+    raw_sendto(raw, p, addr);
+#ifdef LWIP_DEBUG
+    ping_time = sys_now();
+#endif  LWIP_DEBUG
+  }
+  pbuf_free(p);
+}
+static void
+ping_timeout(void *arg)
+{
+  struct raw_pcb *pcb = (struct raw_pcb*)arg;
+  ip_addr_t ping_target;
+
+  LWIP_ASSERT("ping_timeout: no pcb given!", pcb != NULL);
+
+  ip_addr_copy_from_ip4(ping_target, PING_TARGET);
+  ping_send(pcb, &ping_target);
+
+  sys_timeout(PING_DELAY, ping_timeout, pcb);
+}
+static void
+ping_raw_init(void)
+{
+  ping_pcb = raw_new(IP_PROTO_ICMP);
+  LWIP_ASSERT("ping_pcb != NULL", ping_pcb != NULL);
+
+  raw_recv(ping_pcb, ping_recv, NULL);
+  raw_bind(ping_pcb, IP_ADDR_ANY);
+  sys_timeout(PING_DELAY, ping_timeout, ping_pcb);
+}
+void
+ping_send_now(void)
+{
+  ip_addr_t ping_target;
+  LWIP_ASSERT("ping_pcb != NULL", ping_pcb != NULL);
+  ip_addr_copy_from_ip4(ping_target, PING_TARGET);
+  ping_send(ping_pcb, &ping_target);
+}
+void
+ping_init(const ip_addr_t* ping_addr)
+{
+  ping_target = ping_addr;
+
+#if PING_USE_SOCKETS
+  sys_thread_new("ping_thread", ping_thread, NULL, DEFAULT_THREAD_STACKSIZE, DEFAULT_THREAD_PRIO);
+#else  PING_USE_SOCKETS
+  ping_raw_init();
+#endif  PING_USE_SOCKETS
+}
 
 
  */
