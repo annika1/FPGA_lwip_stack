@@ -405,7 +405,14 @@
 /**
  * LWIP_STATS==1: Enable statistics collection in lwip_stats.
  */
+
+#define LWIP_STATS_DISPLAY              1
 #define LWIP_STATS                      1
+#define ETHARP_STATS                    1
+#define IP_STATS                        1
+#define UDP_STATS                       1
+#define TCP_STATS                       1
+
 
 #define LWIP_NETIF_STATUS_CALLBACK      1
 

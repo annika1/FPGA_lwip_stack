@@ -42,10 +42,13 @@
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
+#include "lwip/snmp.h"
 
 // #include "ping.h"
 #include "lwip/inet_chksum.h"
 
+#include "my_udp.h"
+#include "my_tcp.h"
 
 /*
  * Initialisation of the FPGA
@@ -87,7 +90,7 @@ void eth_mac_irq(void* arg)
     u16_t eth_data_count = 0;
 
     if (!(ISR_V & 0x4000000)) {
-        printf("eth_mac_irq: got interrupt_v %x\n", ISR_V);
+        printf("eth_mac_irq: got no interrupt_v %x\n", ISR_V);
         *ISR = 0xFFFFFFFF;
         return;
     }
@@ -95,13 +98,14 @@ void eth_mac_irq(void* arg)
 
     printf("eth_mac_irq: Receive Complete Bit active.\n");
     printf("eth_mac_irq: ISR is %p\n", *ISR);
+
     *ISR = 0xFFFFFFFF;
     uint32_t RDFO_V = *RDFO;
 
     if (RDFO_V > 0) {
-        printf("eth_mac_irq: Received Bytes are in the buffer.\n");
         eth_data_count = *RLR; // don't write u16_t in front!
-        printf("eth_mac_irq: eth_data_count %x\n", eth_data_count);
+        printf("eth_mac_irq: Number of Bytes to read: eth_data_count =  %x\n",
+               eth_data_count);
         int des_adr = *RDR;
         int i = 0;
         eth_data = calloc(eth_data_count/4, sizeof(uint32_t));
@@ -113,8 +117,10 @@ void eth_mac_irq(void* arg)
             eth_data[i] = swap_uint32(*RDFD);
             printf("eth_mac_irq: got %x\n", eth_data[i]);
         }
-    } else {
-        printf("eth_mac_irq: RDFO was empty+.\n");
+    }
+    else{
+        printf("eth_mac_irq: RDFO was empty.\n");
+        return;
     }
 
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
@@ -129,33 +135,44 @@ void eth_mac_irq(void* arg)
             printf("eth_mac_irq: pbuf_take() FAILED returned %d\n", rv);
         }
         free(eth_data);
-        /* Put in a queue which is processed in main loop */
         optimsoc_list_add_tail(eth_rx_pbuf_queue, p);
         optimsoc_list_iterator_t it;
         struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
     }
+    else{
+        printf("eth_mac_irq: Buffer Overflow by generating p.\n");
+    }
 }
 
+
+/**
+ * netif_output: output handler/driver for FPGA (communicate with AXI Stream
+ * FIFO
+ * - update statistic counters
+ * - Read the buffer usage with TDFV
+ * - enter critical section
+ * - write 2 Bytes-wise into the AXI Stream FIFO Buffer
+ * - write the length of the written Bytes into TLR
+ * - Reset the ISR
+ * - exit critical section
+ */
 static err_t 
 netif_output(struct netif *netif, struct pbuf *p)
 {
   LINK_STATS_INC(link.xmit);
-
-  // TODO: Is this useful for us?
-  /* Update SNMP stats (only if you use SNMP) */
-  //MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
-  //int unicast = ((p->payload[0] & 0x01) == 0);
-  //if (unicast) {
-  //  MIB2_STATS_NETIF_INC(netif, ifinucastpkts);
-  //} else {
-  //  MIB2_STATS_NETIF_INC(netif, ifinnucastpkts);
-  //}
+  MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
+  int unicast = ((((uint16_t *) p->payload)[0] & 0x01) == 0);
+  if (unicast) {
+   MIB2_STATS_NETIF_INC(netif, ifinucastpkts);
+  } else {
+    MIB2_STATS_NETIF_INC(netif, ifinnucastpkts);
+  }
 
   printf("netif_output: Writing to Stream FIFO and start transmission.\n");
   uint32_t TDFV_before = *TDFV;
   printf("netif_output: TDFV_before: %x\n", TDFV_before);
   uint32_t restore_2 = or1k_critical_begin();
-  *TDR = (uint32_t) 0x00000002; // Destination Device Address
+  *TDR = (uint32_t) 0x00000002;
   uint32_t left, tmp_len;
   uint32_t buf_p = 0x0;
   for (left = 0; left < ((p->tot_len)/2); left = left + 2){
@@ -170,42 +187,47 @@ netif_output(struct netif *netif, struct pbuf *p)
           printf("Output more than 120Bytes - stop printing it.\n");
       }
   }
-  /* Start MAC transmit here */
-  // Compare Transmit length and occupied storage in Stream FIFO
   uint32_t TDFV_after = *TDFV;
   printf("netif_output: TDFV_after: %x\n", TDFV_after);
-  uint32_t buf_used = TDFV_before - TDFV_after; // used buffer in FIFO
   *TLR = p->tot_len;
   printf("netif_output: Length %x written to TLR\n", p->tot_len);
   printf("netif_output: ISR_value = %x\n", *ISR);
   *ISR = (unsigned int) 0xFFFFFFFF;
-  printf("netif_output: ISR_V after reset: %x\n", *ISR);
   or1k_critical_end(restore_2);
   return ERR_OK;
 }
 
+/*
+ * netif_status_callback: callback function if netif status changes
+ */
+
 static void 
 netif_status_callback(struct netif *netif)
 {
-  // printf("netif status changed %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
-	printf("netif_status_callback: netif status changed.\n");
+  printf("netif status changed %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
 }
 
+
+/*
+ * my_init: Initialization function for netif
+ */
 static err_t 
 my_init(struct netif *netif)
 {
   netif->linkoutput = netif_output;
-  netif->output     = etharp_output;
-  // netif->output_ip6 = ethip6_output;
+  netif->output     = etharp_output; // netif->output_ip6 = ethip6_output;
   netif->mtu        = ETHERNET_MTU;
   netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
-  // MIB2_INIT_NETIF(netif, snmp_ifType_ethernet_csmacd, 100000000);
+  MIB2_INIT_NETIF(netif, snmp_ifType_ethernet_csmacd, 100000000);
 
   SMEMCPY(netif->hwaddr, MYMACADDRESS, sizeof(netif->hwaddr));
   netif->hwaddr_len = sizeof(netif->hwaddr);
   return ERR_OK;
 }
 
+/*
+ * gen_pbuf: Generate a example pbuf for transmitting a packet
+ */
 struct pbuf* gen_pbuf(u16_t len){
 	uint32_t *eth_send = NULL;
 	eth_send = calloc(len/4, sizeof(uint32_t)); // TODO: missing check for the buffer overflow
@@ -227,6 +249,10 @@ struct pbuf* gen_pbuf(u16_t len){
 	return tx_p;
 }
 
+/*
+ * not used init
+ */
+
 void init()
 {
 
@@ -234,289 +260,6 @@ void init()
 
 
 
-/*
- * LWIP UDP Interface
- */
-#if LWIP_UDP
-static struct udp_pcb *udpecho_raw_pcb;
-static void
-udpecho_raw_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p,
-                 const ip_addr_t *addr, u16_t port)
-{
-  LWIP_UNUSED_ARG(arg);
-  if (p != NULL) {
-    /* send received packet back to sender */
-    udp_sendto(upcb, p, addr, port);
-    /* free the pbuf */
-    printf("udpecho_raw_recv: free p\n");
-    pbuf_free(p);
-  }
-}
-void
-udp_my_init(void){
-    udpecho_raw_pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
-    if (udpecho_raw_pcb != NULL) {
-        err_t err;
-
-        err = udp_bind(udpecho_raw_pcb, IP_ANY_TYPE, 54751);
-        if (err == ERR_OK) {
-          udp_recv(udpecho_raw_pcb, udpecho_raw_recv, NULL);
-        } else {
-          /* abort? output diagnostic? */
-        }
-      } else {
-        /* abort? output diagnostic? */
-      }
-}
-#endif // LWIP_UDP
-
-
-
-/*
- * LWIP TCP Interface
- */
-#if LWIP_TCP
-static struct tcp_pcb *tcpecho_raw_pcb;
-enum tcpecho_raw_states
-{
-  ES_NONE = 0,
-  ES_ACCEPTED,
-  ES_RECEIVED,
-  ES_CLOSING
-};
-struct tcpecho_raw_state
-{
-  u8_t state;
-  u8_t retries;
-  struct tcp_pcb *pcb;
-  /* pbuf (chain) to recycle */
-  struct pbuf *p;
-};
-static void
-tcpecho_raw_free(struct tcpecho_raw_state *es)
-{
-  if (es != NULL) {
-    if (es->p) {
-      /* free the buffer chain if present */
-      pbuf_free(es->p);
-    }
-
-    mem_free(es);
-  }
-}
-static void
-tcpecho_raw_close(struct tcp_pcb *tpcb, struct tcpecho_raw_state *es)
-{
-  tcp_arg(tpcb, NULL);
-  tcp_sent(tpcb, NULL);
-  tcp_recv(tpcb, NULL);
-  tcp_err(tpcb, NULL);
-  tcp_poll(tpcb, NULL, 0);
-
-  tcpecho_raw_free(es);
-
-  tcp_close(tpcb);
-}
-static void
-tcpecho_raw_send(struct tcp_pcb *tpcb, struct tcpecho_raw_state *es)
-{
-  struct pbuf *ptr;
-  err_t wr_err = ERR_OK;
-
-  while ((wr_err == ERR_OK) &&
-         (es->p != NULL) &&
-         (es->p->len <= tcp_sndbuf(tpcb))) {
-    ptr = es->p;
-
-    /* enqueue data for transmission */
-    wr_err = tcp_write(tpcb, ptr->payload, ptr->len, 1);
-    if (wr_err == ERR_OK) {
-      u16_t plen;
-
-      plen = ptr->len;
-      /* continue with next pbuf in chain (if any) */
-      es->p = ptr->next;
-      if(es->p != NULL) {
-        /* new reference! */
-        pbuf_ref(es->p);
-      }
-      /* chop first pbuf from chain */
-      pbuf_free(ptr);
-      /* we can read more data now */
-      tcp_recved(tpcb, plen);
-    } else if(wr_err == ERR_MEM) {
-      /* we are low on memory, try later / harder, defer to poll */
-      es->p = ptr;
-    } else {
-      /* other problem ?? */
-    }
-  }
-}
-static void
-tcpecho_raw_error(void *arg, err_t err)
-{
-  struct tcpecho_raw_state *es;
-
-  LWIP_UNUSED_ARG(err);
-
-  es = (struct tcpecho_raw_state *)arg;
-
-  tcpecho_raw_free(es);
-}
-static err_t
-tcpecho_raw_poll(void *arg, struct tcp_pcb *tpcb)
-{
-  err_t ret_err;
-  struct tcpecho_raw_state *es;
-
-  es = (struct tcpecho_raw_state *)arg;
-  if (es != NULL) {
-    if (es->p != NULL) {
-      /* there is a remaining pbuf (chain)  */
-      tcpecho_raw_send(tpcb, es);
-    } else {
-      /* no remaining pbuf (chain)  */
-      if(es->state == ES_CLOSING) {
-        tcpecho_raw_close(tpcb, es);
-      }
-    }
-    ret_err = ERR_OK;
-  } else {
-    /* nothing to be done */
-    tcp_abort(tpcb);
-    ret_err = ERR_ABRT;
-  }
-  return ret_err;
-}
-static err_t
-tcpecho_raw_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
-{
-  struct tcpecho_raw_state *es;
-
-  LWIP_UNUSED_ARG(len);
-
-  es = (struct tcpecho_raw_state *)arg;
-  es->retries = 0;
-
-  if(es->p != NULL) {
-    /* still got pbufs to send */
-    tcp_sent(tpcb, tcpecho_raw_sent);
-    tcpecho_raw_send(tpcb, es);
-  } else {
-    /* no more pbufs to send */
-    if(es->state == ES_CLOSING) {
-      tcpecho_raw_close(tpcb, es);
-    }
-  }
-  return ERR_OK;
-}
-static err_t
-tcpecho_raw_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
-{
-  struct tcpecho_raw_state *es;
-  err_t ret_err;
-
-  LWIP_ASSERT("arg != NULL",arg != NULL);
-  es = (struct tcpecho_raw_state *)arg;
-  if (p == NULL) {
-    /* remote host closed connection */
-    es->state = ES_CLOSING;
-    if(es->p == NULL) {
-      /* we're done sending, close it */
-      tcpecho_raw_close(tpcb, es);
-    } else {
-      /* we're not done yet */
-      tcpecho_raw_send(tpcb, es);
-    }
-    ret_err = ERR_OK;
-  } else if(err != ERR_OK) {
-    /* cleanup, for unknown reason */
-    if (p != NULL) {
-      pbuf_free(p);
-    }
-    ret_err = err;
-  }
-  else if(es->state == ES_ACCEPTED) {
-    /* first data chunk in p->payload */
-    es->state = ES_RECEIVED;
-    /* store reference to incoming pbuf (chain) */
-    es->p = p;
-    tcpecho_raw_send(tpcb, es);
-    ret_err = ERR_OK;
-  } else if (es->state == ES_RECEIVED) {
-    /* read some more data */
-    if(es->p == NULL) {
-      es->p = p;
-      tcpecho_raw_send(tpcb, es);
-    } else {
-      struct pbuf *ptr;
-
-      /* chain pbufs to the end of what we recv'ed previously  */
-      ptr = es->p;
-      pbuf_cat(ptr,p);
-    }
-    ret_err = ERR_OK;
-  } else {
-    /* unkown es->state, trash data  */
-    tcp_recved(tpcb, p->tot_len);
-    pbuf_free(p);
-    ret_err = ERR_OK;
-  }
-  return ret_err;
-}
-static err_t
-tcpecho_raw_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
-{
-  err_t ret_err;
-  struct tcpecho_raw_state *es;
-
-  LWIP_UNUSED_ARG(arg);
-  if ((err != ERR_OK) || (newpcb == NULL)) {
-    return ERR_VAL;
-  }
-
-  /* Unless this pcb should have NORMAL priority, set its priority now.
-     When running out of pcbs, low priority pcbs can be aborted to create
-     new pcbs of higher priority. */
-  tcp_setprio(newpcb, TCP_PRIO_MIN);
-
-  es = (struct tcpecho_raw_state *)mem_malloc(sizeof(struct tcpecho_raw_state));
-  if (es != NULL) {
-    es->state = ES_ACCEPTED;
-    es->pcb = newpcb;
-    es->retries = 0;
-    es->p = NULL;
-    /* pass newly allocated es to our callbacks */
-    tcp_arg(newpcb, es);
-    tcp_recv(newpcb, tcpecho_raw_recv);
-    tcp_err(newpcb, tcpecho_raw_error);
-    tcp_poll(newpcb, tcpecho_raw_poll, 0);
-    tcp_sent(newpcb, tcpecho_raw_sent);
-    ret_err = ERR_OK;
-  } else {
-    ret_err = ERR_MEM;
-  }
-  return ret_err;
-}
-void
-tcpecho_raw_init(void)
-{
-  tcpecho_raw_pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
-  if (tcpecho_raw_pcb != NULL) {
-    err_t err;
-
-    err = tcp_bind(tcpecho_raw_pcb, IP_ANY_TYPE, 2049);
-    if (err == ERR_OK) {
-      tcpecho_raw_pcb = tcp_listen(tcpecho_raw_pcb);
-      tcp_accept(tcpecho_raw_pcb, tcpecho_raw_accept); // tcpecho_raw_accept (another function)
-    } else {
-      /* abort? output diagnostic? */
-    }
-  } else {
-    /* abort? output diagnostic? */
-  }
-}
-#endif // LWIP_TCP
 
 void main(void)
 {
@@ -524,13 +267,11 @@ void main(void)
     lwip_init();
     struct netif netif;
 
-    // startup defaults (may be overridden by one or more opts)
     // UDP Test Packet
     IP4_ADDR(&gw, 129,187,155,1);
     IP4_ADDR(&ipaddr, 129,187,155,177);
+
     // TCP Test Packet
-
-
     //IP4_ADDR(&gw, 10,162,229,1);
     //IP4_ADDR(&ipaddr, 10,162,229,2);
 
@@ -538,7 +279,7 @@ void main(void)
     netif_add(&netif, &ipaddr, &netmask, &gw, NULL, my_init,
               netif_input);
 
-
+    // HTTP Server
     //netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
     //         netif_input );
 
@@ -556,26 +297,25 @@ void main(void)
     netif_set_up(&netif);
 
     // All initialization done, we're ready to receive data
-    printf("main: Reset done, Init done, interrupts enabled\n");
+    printf("main: Reset done, Init done, Interrupts enabled\n");
     printf("main: IER Register: %x\n", *IER);
 
 
     int T_en = 1;
-    u32_t now = 0;
-    u32_t last = 0;
+
     optimsoc_list_iterator_t iter = 0;
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
-    printf("main: ISR is at the beginning: %x\n", *ISR);
     eth_rx_pbuf_queue = NULL;
 
 #if LWIP_UDP
     udp_my_init();
     udp_bind_netif(udpecho_raw_pcb, &netif);
 #endif // LWIP_UDP
+
 #if LWIP_DEBUG
     debug_flags |= (LWIP_DBG_ON|LWIP_DBG_TRACE|LWIP_DBG_STATE|LWIP_DBG_FRESH|LWIP_DBG_HALT|LWIP_DBG_TRACE);
 #endif //LWIP_DEBUG
-    printf("netif->mtu: %i\n", netif.mtu);
+
    /*
    * DHCP Init
    */
@@ -606,7 +346,6 @@ void main(void)
     while (1) {
         // TODO: Check link status
 
-        /* Check for received frames, feed them to lwIP */
         if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) //
         {
             if (NULL == optimsoc_list_first_element(eth_rx_pbuf_queue, &iter)) {
@@ -619,16 +358,13 @@ void main(void)
             or1k_critical_end(restore);
 
             LINK_STATS_INC(link.recv);
-
-            /* Update SNMP stats (only if you use SNMP) */
-            // TODO: see if that's useful for us
-            /*MIB2_STATS_NETIF_ADD(netif, ifoutoctets, p->tot_len);
-             int unicast = ((p->payload[0] & 0x01) == 0);
-             if (unicast) {
-             MIB2_STATS_NETIF_INC(netif, ifoutucastpkts);
-             } else {
-             MIB2_STATS_NETIF_INC(netif, ifoutnucastpkts);
-             }*/
+            MIB2_STATS_NETIF_ADD(&netif, ifoutoctets, p->tot_len);
+            int unicast = ((((uint16_t *)p->payload)[0] & 0x01) == 0);
+            if (unicast) {
+            MIB2_STATS_NETIF_INC(&netif, ifoutucastpkts);
+            } else {
+            MIB2_STATS_NETIF_INC(&netif, ifoutnucastpkts);
+            }
 
             // TODO: activate the checksum test
 
@@ -662,166 +398,5 @@ void main(void)
 
         /* Cyclic lwIP timers check */
        sys_check_timeouts();
-       /* your application goes here */
     }
 }
-
-
-
-/*
- * REST
- *
- *
-     char ip_str[16] = {0}, nm_str[16] = {0}, gw_str[16] = {0};
-    /* startup defaults (may be overridden by one or more opts)
-    IP4_ADDR(&gw, 192,187,155,1);
-    IP4_ADDR(&ipaddr, 192,187,155,199);
-    IP4_ADDR(&netmask, 255,255,255,0);
-
-    strncpy(ip_str, ip4addr_ntoa(&ipaddr), sizeof(ip_str));
-    strncpy(nm_str, ip4addr_ntoa(&netmask), sizeof(nm_str));
-    strncpy(gw_str, ip4addr_ntoa(&gw), sizeof(gw_str));
-    printf("Host at %s mask %s gateway %s\n", ip_str, nm_str, gw_str);
- *
-  /* old for loop */
-  //for (left = 0; left < ((p->tot_len)/4); left = left + 1){
-      //*TDFD = swap_uint32(((uint32_t *)p->payload)[left]);
-
-  //printf("p->payload now: %x\n", swap_uint32(((uint32_t *)p->payload)[left]));
-  /* end old for loop
-
-
-/*
- * PING TCP Interface
-
-* Prepare a echo ICMP request
-*
-* #if LWIP_RAW
-    //IP4_ADDR(&myip, 129, 187, 155, 55);
-    //ping_init(&ipaddr);
-#endif // LWIP_RAW
-
-static void
-ping_prepare_echo( struct icmp_echo_hdr *iecho, u16_t len)
-{
-  size_t i;
-  size_t data_len = len - sizeof(struct icmp_echo_hdr);
-
-  ICMPH_TYPE_SET(iecho, ICMP_ECHO);
-  ICMPH_CODE_SET(iecho, 0);
-  iecho->chksum = 0;
-  iecho->id     = PING_ID;
-  iecho->seqno  = lwip_htons(++ping_seq_num);
-
-   fill the additional data buffer with some data
-  for(i = 0; i < data_len; i++) {
-    ((char*)iecho)[sizeof(struct icmp_echo_hdr) + i] = (char)i;
-  }
-
-  iecho->chksum = inet_chksum(iecho, len);
-}
- Ping using the raw ip
-static u8_t
-ping_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p, const ip_addr_t *addr)
-{
-  struct icmp_echo_hdr *iecho;
-  LWIP_UNUSED_ARG(arg);
-  LWIP_UNUSED_ARG(pcb);
-  LWIP_UNUSED_ARG(addr);
-  LWIP_ASSERT("p != NULL", p != NULL);
-
-  if ((p->tot_len >= (PBUF_IP_HLEN + sizeof(struct icmp_echo_hdr))) &&
-      pbuf_remove_header(p, PBUF_IP_HLEN) == 0) {
-    iecho = (struct icmp_echo_hdr *)p->payload;
-
-    if ((iecho->id == PING_ID) && (iecho->seqno == lwip_htons(ping_seq_num))) {
-      LWIP_DEBUGF( PING_DEBUG, ("ping: recv "));
-      ip_addr_debug_print(PING_DEBUG, addr);
-      LWIP_DEBUGF( PING_DEBUG, (" %"U32_F" ms\n", (sys_now()-ping_time)));
-
-       do some ping result processing
-      PING_RESULT(1);
-      pbuf_free(p);
-      return 1;  eat the packet
-    }
-     not eaten, restore original packet
-    pbuf_add_header(p, PBUF_IP_HLEN);
-  }
-
-  return 0;  don't eat the packet
-}
-static void
-ping_send(struct raw_pcb *raw, ip_addr_t *addr)
-{
-  struct pbuf *p;
-  struct icmp_echo_hdr *iecho;
-  size_t ping_size = sizeof(struct icmp_echo_hdr) + PING_DATA_SIZE;
-
-  LWIP_DEBUGF( PING_DEBUG, ("ping: send "));
-  ip_addr_debug_print(PING_DEBUG, addr);
-  LWIP_DEBUGF( PING_DEBUG, ("\n"));
-  LWIP_ASSERT("ping_size <= 0xffff", ping_size <= 0xffff);
-
-  p = pbuf_alloc(PBUF_IP, (u16_t)ping_size, PBUF_RAM);
-  if (!p) {
-    return;
-  }
-  if ((p->len == p->tot_len) && (p->next == NULL)) {
-    iecho = (struct icmp_echo_hdr *)p->payload;
-
-    ping_prepare_echo(iecho, (u16_t)ping_size);
-
-    raw_sendto(raw, p, addr);
-#ifdef LWIP_DEBUG
-    ping_time = sys_now();
-#endif  LWIP_DEBUG
-  }
-  pbuf_free(p);
-}
-static void
-ping_timeout(void *arg)
-{
-  struct raw_pcb *pcb = (struct raw_pcb*)arg;
-  ip_addr_t ping_target;
-
-  LWIP_ASSERT("ping_timeout: no pcb given!", pcb != NULL);
-
-  ip_addr_copy_from_ip4(ping_target, PING_TARGET);
-  ping_send(pcb, &ping_target);
-
-  sys_timeout(PING_DELAY, ping_timeout, pcb);
-}
-static void
-ping_raw_init(void)
-{
-  ping_pcb = raw_new(IP_PROTO_ICMP);
-  LWIP_ASSERT("ping_pcb != NULL", ping_pcb != NULL);
-
-  raw_recv(ping_pcb, ping_recv, NULL);
-  raw_bind(ping_pcb, IP_ADDR_ANY);
-  sys_timeout(PING_DELAY, ping_timeout, ping_pcb);
-}
-void
-ping_send_now(void)
-{
-  ip_addr_t ping_target;
-  LWIP_ASSERT("ping_pcb != NULL", ping_pcb != NULL);
-  ip_addr_copy_from_ip4(ping_target, PING_TARGET);
-  ping_send(ping_pcb, &ping_target);
-}
-void
-ping_init(const ip_addr_t* ping_addr)
-{
-  ping_target = ping_addr;
-
-#if PING_USE_SOCKETS
-  sys_thread_new("ping_thread", ping_thread, NULL, DEFAULT_THREAD_STACKSIZE, DEFAULT_THREAD_PRIO);
-#else  PING_USE_SOCKETS
-  ping_raw_init();
-#endif  PING_USE_SOCKETS
-}
-
-
- */
-
-
