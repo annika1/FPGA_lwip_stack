@@ -127,7 +127,7 @@ void eth_mac_irq(void* arg)
 
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
     struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
-    printf("eth_mac_irq: allocation of p at %p\n of size %d\n", p,
+    printf("eth_mac_irq: allocation of p at %p of size %d\n", p,
            eth_data_count);
 
     if (p != NULL) {
@@ -216,9 +216,9 @@ netif_status_callback(struct netif *netif)
 static err_t
 my_init(struct netif *netif)
 {
-  netif->linkoutput = netif_output;
+    netif->linkoutput = netif_output;
     netif->output = etharp_output;
-    // netif->output_ip6 = ethip6_output;
+    netif->output_ip6 = ethip6_output;
   netif->mtu        = ETHERNET_MTU;
   netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
   MIB2_INIT_NETIF(netif, snmp_ifType_ethernet_csmacd, 100000000);
@@ -299,7 +299,7 @@ void main(void)
     IP4_ADDR(&gw, 192,168,100,1);
     IP4_ADDR(&ipaddr, 192,168,100,114);
 
-    // IP6_ADDR(&ip6addr, 1234, 5666, 1914, 5111);
+    IP6_ADDR(&ip6addr, 1234, 5666, 1914, 5111);
 
     // TCP Test Packet
     //IP4_ADDR(&gw, 10,162,229,1);
@@ -312,16 +312,16 @@ void main(void)
         printf("netif_add_ip6_address failed.\n");
     }
 
-    //err_ipv6_netif = netif_add_ip6_address(&netif, &ip6addr, NULL);
-    //if (err_ipv6_netif != ERR_OK) {
-    //    printf("netif_add_ip6_address failed.\n");
-    //}
+    err_ipv6_netif = netif_add_ip6_address(&netif, &ip6addr, NULL);
+    if (err_ipv6_netif != ERR_OK) {
+        printf("netif_add_ip6_address failed.\n");
+    }
 
     netif.name[0] = 'e';
     netif.name[1] = '0';
 
-    // netif_create_ip6_linklocal_address(&netif, 1);
-    // netif.ip6_autoconfig_enabled = 1;
+    netif_create_ip6_linklocal_address(&netif, 1);
+    netif.ip6_autoconfig_enabled = 1;
 
     netif_set_status_callback(&netif, netif_status_callback);
     netif_set_default(&netif);
@@ -417,7 +417,8 @@ void main(void)
         }
 
 
-        for(int i=0; i<=100; i++); // For loop for busy waiting
+      for (int i = 0; i <= 100; i++)
+            ; // For loop for busy waiting
 
         /* Cyclic lwIP timers check */
        sys_check_timeouts();
