@@ -3,6 +3,7 @@
 /*
  * raw LWIP TCP Interface
  */
+
 #if LWIP_TCP
 static struct tcp_pcb *tcpecho_raw_pcb;
 enum tcpecho_raw_states
@@ -238,6 +239,7 @@ tcpecho_raw_init(void)
       tcpecho_raw_pcb = tcp_listen(tcpecho_raw_pcb);
       tcp_accept(tcpecho_raw_pcb, tcpecho_raw_accept); // tcpecho_raw_accept (another function)
     } else {
+        printf("tcp_bind failed.\n");
       /* abort? output diagnostic? */
     }
   } else {

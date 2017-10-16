@@ -43,6 +43,7 @@
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
 #include "lwip/snmp.h"
+#include "lwip/ethip6.h"
 
 // #include "ping.h"
 #include "lwip/inet_chksum.h"
@@ -58,6 +59,7 @@
  */
 static void app_init()
 {
+    printf("Test.\n");
     or1k_interrupt_handler_add(ETH_INTERRUPT, &eth_mac_irq, 0);
     or1k_interrupt_enable(ETH_INTERRUPT);
 
@@ -156,7 +158,7 @@ void eth_mac_irq(void* arg)
  * - Reset the ISR
  * - exit critical section
  */
-static err_t 
+static err_t
 netif_output(struct netif *netif, struct pbuf *p)
 {
   LINK_STATS_INC(link.xmit);
@@ -201,7 +203,7 @@ netif_output(struct netif *netif, struct pbuf *p)
  * netif_status_callback: callback function if netif status changes
  */
 
-static void 
+static void
 netif_status_callback(struct netif *netif)
 {
   printf("netif status changed %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
@@ -211,11 +213,12 @@ netif_status_callback(struct netif *netif)
 /*
  * my_init: Initialization function for netif
  */
-static err_t 
+static err_t
 my_init(struct netif *netif)
 {
   netif->linkoutput = netif_output;
-  netif->output     = etharp_output; // netif->output_ip6 = ethip6_output;
+    netif->output = etharp_output;
+    // netif->output_ip6 = ethip6_output;
   netif->mtu        = ETHERNET_MTU;
   netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
   MIB2_INIT_NETIF(netif, snmp_ifType_ethernet_csmacd, 100000000);
@@ -258,6 +261,29 @@ void init()
 
 }
 
+#if LWIP_DHCP
+/*
+* DHCP Init
+*/
+void dhcp_init(struct netif *netif){
+    printf("netif-link-is-up-flag: %i\n", netif->flags & NETIF_FLAG_LINK_UP);
+    printf("dhcp_init: DHCP init - start.\n");
+
+    err_t error_dhcp;
+    /* Start DHCP and HTTPD */
+    error_dhcp = dhcp_start(netif);
+    if (error_dhcp != ERR_OK){
+        printf("DHCP Error occurred - out of memory.\n");
+    }
+    else
+    {
+        printf("DHCP started.\n");
+        u8_t myip_dhcp;
+        myip_dhcp = dhcp_supplied_address(netif);
+        printf("main: ip address now: %x\n", myip_dhcp);
+    }
+}
+#endif // LWIP_DHCP
 
 
 
@@ -266,42 +292,60 @@ void main(void)
     app_init();
     lwip_init();
     struct netif netif;
+    struct netif *netif_control;
+    err_t err_ipv6_netif;
 
     // UDP Test Packet
-    IP4_ADDR(&gw, 129,187,155,1);
-    IP4_ADDR(&ipaddr, 129,187,155,177);
+    IP4_ADDR(&gw, 192,168,100,1);
+    IP4_ADDR(&ipaddr, 192,168,100,114);
+
+    // IP6_ADDR(&ip6addr, 1234, 5666, 1914, 5111);
 
     // TCP Test Packet
     //IP4_ADDR(&gw, 10,162,229,1);
     //IP4_ADDR(&ipaddr, 10,162,229,2);
 
-    IP4_ADDR(&netmask, 255,255,255,0);
-    netif_add(&netif, &ipaddr, &netmask, &gw, NULL, my_init,
-              netif_input);
+     IP4_ADDR(&netmask, 255,255,255,0);
+    netif_control = netif_add(&netif, &ipaddr, &netmask, &gw, NULL, my_init,
+                              netif_input);
+    if (netif_control == NULL) {
+        printf("netif_add_ip6_address failed.\n");
+    }
 
-    // HTTP Server
-    //netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, my_init,
-    //         netif_input );
-
-    //printf("main: ip_addr: %i\n", (&ipaddr)->addr);
-    //printf("main: netif_addr: %i\n", (&(&netif)->ip_addr)->addr);
-    //printf("main: pointer to address: %i\n", netif.ip_addr);
+    //err_ipv6_netif = netif_add_ip6_address(&netif, &ip6addr, NULL);
+    //if (err_ipv6_netif != ERR_OK) {
+    //    printf("netif_add_ip6_address failed.\n");
+    //}
 
     netif.name[0] = 'e';
     netif.name[1] = '0';
 
-    //netif_create_ip6_linklocal_address(&netif, 1);
-    //netif.ip6_autoconfig_enabled = 1;
+    // netif_create_ip6_linklocal_address(&netif, 1);
+    // netif.ip6_autoconfig_enabled = 1;
+
     netif_set_status_callback(&netif, netif_status_callback);
     netif_set_default(&netif);
     netif_set_up(&netif);
+
+    printf("ip6_addr: %x\n", netif.ip6_addr[0]);
+    printf("ip6_addr - state - 0: %x\n", netif.ip6_addr_state[0]);
+    printf("ip6_addr - state - 1: %x\n", netif.ip6_addr_state[1]);
+    printf("ip6_addr - state - 2: %x\n", netif.ip6_addr_state[2]);
+    printf("ip6_addr - state - 3: %x\n", netif.ip6_addr_state[3]);
+
+
+#if LWIP_DHCP
+    dhcp_init(&netif);
+    // httpd_init();
+#endif // LWIP_DHCP
+
 
     // All initialization done, we're ready to receive data
     printf("main: Reset done, Init done, Interrupts enabled\n");
     printf("main: IER Register: %x\n", *IER);
 
 
-    int T_en = 1;
+    int T_en = 0;
 
     optimsoc_list_iterator_t iter = 0;
     eth_rx_pbuf_queue = optimsoc_list_init(NULL);
@@ -312,38 +356,17 @@ void main(void)
     udp_bind_netif(udpecho_raw_pcb, &netif);
 #endif // LWIP_UDP
 
+
 #if LWIP_DEBUG
     debug_flags |= (LWIP_DBG_ON|LWIP_DBG_TRACE|LWIP_DBG_STATE|LWIP_DBG_FRESH|LWIP_DBG_HALT|LWIP_DBG_TRACE);
 #endif //LWIP_DEBUG
-
-   /*
-   * DHCP Init
-   */
-#if LWIP_DHCP
-    err_t error_dhcp;
-    /* Start DHCP and HTTPD */
-    error_dhcp = dhcp_start(&netif);
-    if (error_dhcp != ERR_OK){
-        printf("DHCP Error occurred - out of memory.\n");
-    }
-    else
-    {
-        printf("DHCP started.\n");
-        u8_t myip_dhcp;
-        myip_dhcp = dhcp_supplied_address(&netif);
-        printf("main: ip address now: %x\n", myip_dhcp);
-    }
-    // httpd_init();
-#endif // LWIP_DHCP
 
 #if LWIP_TCP
     tcpecho_raw_init();
     tcp_bind_netif(tcpecho_raw_pcb, &netif);
 #endif // LWIP_TCP
 
-    // netif_set_link_up(&netif);
-
-    while (1) {
+     while (1) {
         // TODO: Check link status
 
         if (eth_rx_pbuf_queue != NULL && optimsoc_list_length(eth_rx_pbuf_queue) != 0) //
@@ -400,3 +423,29 @@ void main(void)
        sys_check_timeouts();
     }
 }
+
+
+
+/*
+if (netif_control == NULL){
+    printf("main: netif_add failed.\n");
+}
+else{
+    printf("main: netif added.\n");
+}
+
+printf("main: ip_addr: %i\n", (&ipaddr)->addr);
+printf("main: netif_addr: %i\n", (&(&netif)->ip_addr)->addr);
+printf("main: pointer to address: %i\n", netif.ip_addr);
+
+
+// HTTP Server
+netif_control = netif_add(&netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL,
+                          my_init, netif_input);
+if(netif_control == NULL){
+    printf("main: netif_add (2) failed.\n");
+}
+else{
+    printf("main: netif (2) added.\n");
+}
+*/

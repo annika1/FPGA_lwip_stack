@@ -35,6 +35,7 @@ unsigned char debug_flags;
 struct optimsoc_list_t *eth_rx_pbuf_queue = NULL;
 /* (manual) host IP configuration */
 static ip4_addr_t ipaddr, netmask, gw;
+static ip6_addr_t ip6addr;
 void eth_mac_irq(void* arg);
 
 

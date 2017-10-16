@@ -33,7 +33,7 @@ NETIFFILES=$(LWIPDIR)/netif/ethernet.c
 
 EXTRA_LIBS=
 EXTRA_INCS=-I $(LWIP_CONTRIB_DIR) -I $(LWIP_CONTRIB_DIR)/include  -I $(LWIPDIR)/include 
-EXTRA_SRCS+=$(COREFILES) $(CORE4FILES) $(NETIFFILES) $(SNMPFILES) $(CONTRIBFILES)
+EXTRA_SRCS+=$(COREFILES) $(CORE4FILES) $(NETIFFILES) $(SNMPFILES) $(CONTRIBFILES) $(CORE6FILES)
 
 BUILDSCRIPTS=$(shell pkg-config --variable=buildscriptdir optimsoc-baremetal-runtime)
 include $(BUILDSCRIPTS)/Makefile.inc
