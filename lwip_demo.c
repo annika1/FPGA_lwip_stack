@@ -103,46 +103,51 @@ void eth_mac_irq(void* arg)
 
     *ISR = 0xFFFFFFFF;
     uint32_t RDFO_V = *RDFO;
-
     if (RDFO_V > 0) {
-        eth_data_count = *RLR; // don't write u16_t in front!
-        printf("eth_mac_irq: Number of Bytes to read: eth_data_count =  %x\n",
-               eth_data_count);
-        int des_adr = *RDR;
-        int i = 0;
-        eth_data = calloc(eth_data_count/4, sizeof(uint32_t));
-        if (eth_data == NULL){
-            printf("eth_mac_irq: Buffer Overflow by generating eth_data.\n");
-            return;
-        }
-        for (i = 0; i < eth_data_count/4; i++) {
-            eth_data[i] = swap_uint32(*RDFD);
-            printf("eth_mac_irq: got %x\n", eth_data[i]);
-        }
+        do {
+            eth_data_count = *RLR; // don't write u16_t in front!
+            printf("eth_mac_irq: Number of Bytes to read: eth_data_count =  %x\n",
+                   eth_data_count);
+            int des_adr = *RDR;
+            int i = 0;
+            eth_data = calloc(eth_data_count / 4, sizeof(uint32_t));
+            if (eth_data == NULL) {
+                printf("eth_mac_irq: Buffer Overflow by generating eth_data.\n");
+                return;
+            }
+            for (i = 0; i < eth_data_count / 4; i++) {
+                eth_data[i] = swap_uint32(*RDFD);
+                printf("eth_mac_irq: got %x\n", eth_data[i]);
+            }
+            RDFO_V = *RDFO;
+
+            if (eth_rx_pbuf_queue == NULL) {
+                eth_rx_pbuf_queue = optimsoc_list_init(NULL);
+            }
+
+            struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
+            printf("eth_mac_irq: allocation of p at %p of size %d\n", p,
+                   eth_data_count);
+
+            if (p != NULL) {
+                err_t rv;
+                rv = pbuf_take(p, (const void*) eth_data, eth_data_count);
+                if (rv != ERR_OK) {
+                    printf("eth_mac_irq: pbuf_take() FAILED returned %d\n", rv);
+                }
+                free(eth_data);
+                optimsoc_list_add_tail(eth_rx_pbuf_queue, p);
+                optimsoc_list_iterator_t it;
+                struct pbuf* test = optimsoc_list_first_element(
+                        eth_rx_pbuf_queue, &it);
+            } else {
+                printf("eth_mac_irq: Buffer Overflow by generating p.\n");
+            }
+        } while (RDFO_V > 0);
     }
     else{
         printf("eth_mac_irq: RDFO was empty.\n");
         return;
-    }
-
-    eth_rx_pbuf_queue = optimsoc_list_init(NULL);
-    struct pbuf* p = pbuf_alloc(PBUF_RAW, eth_data_count, PBUF_POOL);
-    printf("eth_mac_irq: allocation of p at %p of size %d\n", p,
-           eth_data_count);
-
-    if (p != NULL) {
-        err_t rv;
-        rv = pbuf_take(p, (const void*) eth_data, eth_data_count);
-        if (rv != ERR_OK) {
-            printf("eth_mac_irq: pbuf_take() FAILED returned %d\n", rv);
-        }
-        free(eth_data);
-        optimsoc_list_add_tail(eth_rx_pbuf_queue, p);
-        optimsoc_list_iterator_t it;
-        struct pbuf* test = optimsoc_list_first_element(eth_rx_pbuf_queue, &it);
-    }
-    else{
-        printf("eth_mac_irq: Buffer Overflow by generating p.\n");
     }
 }
 
@@ -417,7 +422,7 @@ void main(void)
         }
 
 
-      for (int i = 0; i <= 100; i++)
+      for (int i = 0; i <= 1000; i++)
             ; // For loop for busy waiting
 
         /* Cyclic lwIP timers check */

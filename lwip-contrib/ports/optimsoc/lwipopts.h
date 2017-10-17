@@ -109,7 +109,7 @@
  * MEMP_NUM_TCP_PCB: the number of simulatenously active TCP connections.
  * (requires the LWIP_TCP option)
  */
-#define MEMP_NUM_TCP_PCB                2
+#define MEMP_NUM_TCP_PCB                5
 
 /**
  * MEMP_NUM_TCP_PCB_LISTEN: the number of listening TCP connections.
@@ -129,7 +129,7 @@
  * their destination address) to finish.
  * (requires the ARP_QUEUEING option)
  */
-#define MEMP_NUM_ARP_QUEUE              2
+#define MEMP_NUM_ARP_QUEUE              30
 
 /**
  * MEMP_NUM_SYS_TIMEOUT: the number of simultaneously active timeouts.
